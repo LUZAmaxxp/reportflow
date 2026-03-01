@@ -169,7 +169,7 @@ export default async function ReviewQueuePage({
     return (
       <div className="flex flex-col items-center justify-center py-12">
         <p className="text-muted-foreground">Document introuvable</p>
-        <Link href="/documents" className="mt-4 text-sm text-primary hover:underline">
+        <Link href="/documents" className="mt-4 text-sm text-accent hover:underline">
           Retour aux documents
         </Link>
       </div>
@@ -180,21 +180,21 @@ export default async function ReviewQueuePage({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
+          <h1 className="text-3xl font-bold tracking-tight text-foreground font-serif">
             File de révision
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground mt-1">
             {documentData.originalFilename}
           </p>
         </div>
         <div className="flex gap-3 text-sm">
           <Link
             href={`/documents/${id}`}
-            className="text-primary hover:underline"
+            className="text-accent hover:underline"
           >
             Vue détail
           </Link>
-          <Link href="/documents" className="text-sm text-primary hover:underline">
+          <Link href="/documents" className="text-sm text-accent hover:underline">
             ← Retour
           </Link>
         </div>

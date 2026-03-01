@@ -92,9 +92,9 @@ export default function ReportsPage() {
   return (
     <section className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight">Rapports</h1>
+        <h1 className="text-3xl font-bold tracking-tight text-foreground font-serif">Rapports</h1>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-40">
+          <SelectTrigger className="w-40 bg-card border-border">
             <SelectValue placeholder="Filtrer par statut" />
           </SelectTrigger>
           <SelectContent>
@@ -108,12 +108,12 @@ export default function ReportsPage() {
       {isLoading && reports.length === 0 ? (
         <p className="text-sm text-muted-foreground">Chargement...</p>
       ) : reports.length === 0 ? (
-        <Card>
+        <Card className="bg-card border-border">
           <CardContent className="py-12 text-center space-y-4">
             <p className="text-muted-foreground">
               Aucun rapport trouvé. Lancez une conversation pour générer votre premier rapport ESG.
             </p>
-            <Button asChild>
+            <Button asChild className="bg-accent hover:bg-accent/90">
               <Link href="/chat">Démarrer une conversation</Link>
             </Button>
           </CardContent>
@@ -123,7 +123,7 @@ export default function ReportsPage() {
           {reports.map((r) => (
             <Card
               key={r.report_id}
-              className="cursor-pointer hover:shadow-md transition-shadow"
+              className="cursor-pointer bg-card border-border hover:border-accent/50 transition-colors"
               onClick={() => router.push(`/reports/${r.report_id}`)}
             >
               <CardHeader className="py-3">

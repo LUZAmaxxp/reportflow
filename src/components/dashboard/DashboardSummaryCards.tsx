@@ -27,55 +27,55 @@ export default function DashboardSummaryCards({ data }: DashboardSummaryCardsPro
     <div className="space-y-6">
       {/* Summary cards row */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
+        <Card className="bg-card border-border hover:border-accent/50 transition-colors">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{fr.documents.title}</CardTitle>
-            <FileTextIcon className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium text-muted-foreground">{fr.documents.title}</CardTitle>
+            <FileTextIcon className="h-4 w-4 text-accent" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{totalDocs}</div>
-            <p className="text-xs text-muted-foreground">
+            <div className="text-3xl font-bold text-foreground">{totalDocs}</div>
+            <p className="text-xs text-muted-foreground mt-1">
               {reviewReady} {statusLabels.review_ready.toLowerCase()}
             </p>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="bg-card border-border hover:border-accent/50 transition-colors">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{fr.dashboard.unresolvedConflicts}</CardTitle>
-            <AlertTriangleIcon className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium text-muted-foreground">{fr.dashboard.unresolvedConflicts}</CardTitle>
+            <AlertTriangleIcon className="h-4 w-4 text-amber-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{data.unresolved_conflict_count}</div>
+            <div className="text-3xl font-bold text-foreground">{data.unresolved_conflict_count}</div>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="bg-card border-border hover:border-accent/50 transition-colors">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{fr.reports.title}</CardTitle>
-            <ClipboardListIcon className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium text-muted-foreground">{fr.reports.title}</CardTitle>
+            <ClipboardListIcon className="h-4 w-4 text-emerald-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{data.recent_reports.length}</div>
+            <div className="text-3xl font-bold text-foreground">{data.recent_reports.length}</div>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="bg-card border-border hover:border-destructive/50 transition-colors">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{statusLabels.failed}</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">{statusLabels.failed}</CardTitle>
             <AlertTriangleIcon className="h-4 w-4 text-destructive" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-destructive">{failed}</div>
+            <div className="text-3xl font-bold text-destructive">{failed}</div>
           </CardContent>
         </Card>
       </div>
 
       {/* Recent documents + reports */}
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
+        <Card className="bg-card border-border">
           <CardHeader>
-            <CardTitle className="text-base">{fr.dashboard.recentDocuments}</CardTitle>
+            <CardTitle className="text-base text-foreground font-serif">{fr.dashboard.recentDocuments}</CardTitle>
           </CardHeader>
           <CardContent>
             {data.recent_documents.length === 0 ? (
@@ -83,14 +83,14 @@ export default function DashboardSummaryCards({ data }: DashboardSummaryCardsPro
             ) : (
               <ul className="space-y-3">
                 {data.recent_documents.map((doc) => (
-                  <li key={doc.document_id} className="flex items-center justify-between text-sm">
+                  <li key={doc.document_id} className="flex items-center justify-between text-sm hover:bg-muted/50 rounded px-2 py-1 transition-colors">
                     <Link
                       href={`/documents/${doc.document_id}`}
-                      className="font-medium hover:underline truncate max-w-[200px]"
+                      className="font-medium text-foreground hover:text-accent truncate max-w-[200px]"
                     >
                       {doc.title}
                     </Link>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-xs text-muted-foreground flex-shrink-0 ml-2">
                       {(() => {
                         try {
                           return formatDistanceToNow(new Date(doc.created_at), {
@@ -109,9 +109,9 @@ export default function DashboardSummaryCards({ data }: DashboardSummaryCardsPro
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="bg-card border-border">
           <CardHeader>
-            <CardTitle className="text-base">{fr.dashboard.recentReports}</CardTitle>
+            <CardTitle className="text-base text-foreground font-serif">{fr.dashboard.recentReports}</CardTitle>
           </CardHeader>
           <CardContent>
             {data.recent_reports.length === 0 ? (
@@ -119,14 +119,14 @@ export default function DashboardSummaryCards({ data }: DashboardSummaryCardsPro
             ) : (
               <ul className="space-y-3">
                 {data.recent_reports.map((report) => (
-                  <li key={report.report_id} className="flex items-center justify-between text-sm">
+                  <li key={report.report_id} className="flex items-center justify-between text-sm hover:bg-muted/50 rounded px-2 py-1 transition-colors">
                     <Link
                       href={`/reports/${report.report_id}`}
-                      className="font-medium hover:underline"
+                      className="font-medium text-foreground hover:text-accent"
                     >
                       Rapport v{report.version} — {fr.reports.status[report.status]}
                     </Link>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-xs text-muted-foreground flex-shrink-0 ml-2">
                       {(() => {
                         try {
                           return formatDistanceToNow(new Date(report.generated_at), {

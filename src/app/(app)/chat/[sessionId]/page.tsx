@@ -67,9 +67,9 @@ export default async function ChatSessionPage({
   }));
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] -m-6">
+    <div className="flex h-[calc(100vh-3.5rem)] -m-6 bg-background">
       <SessionSidebar activeSessionId={sessionId} />
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col bg-gradient-to-br from-background via-muted/20 to-background">
         <ChatShell sessionId={sessionId} initialMessages={initialMessages} />
       </div>
     </div>

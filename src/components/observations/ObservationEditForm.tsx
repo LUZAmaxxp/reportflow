@@ -158,9 +158,9 @@ export default function ObservationEditForm({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md bg-card border-border">
         <DialogHeader>
-          <DialogTitle>Modifier l&apos;observation</DialogTitle>
+          <DialogTitle className="text-foreground font-serif">Modifier l&apos;observation</DialogTitle>
         </DialogHeader>
 
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
@@ -255,10 +255,11 @@ export default function ObservationEditForm({
               type="button"
               variant="outline"
               onClick={() => onOpenChange(false)}
+              className="border-border hover:bg-muted"
             >
               Annuler
             </Button>
-            <Button type="submit" disabled={isSubmitting}>
+            <Button type="submit" disabled={isSubmitting} className="bg-accent hover:bg-accent/90 text-background">
               {isSubmitting ? "Sauvegarde…" : "Sauvegarder"}
             </Button>
           </DialogFooter>

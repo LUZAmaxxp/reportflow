@@ -16,7 +16,7 @@ export default async function SettingsPage() {
 
   return (
     <section className="grid gap-6 max-w-3xl">
-      <h1 className="text-2xl font-bold tracking-tight">
+      <h1 className="text-3xl font-bold tracking-tight text-foreground font-serif">
         {fr.settings.title}
       </h1>
       <SettingsClient

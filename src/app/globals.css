@@ -49,71 +49,76 @@
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* ESG Platform Colors - Light mode (unused, kept for compatibility) */
+  --background: 0 0% 100%;
+  --foreground: 0 0% 15%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 15%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 15%;
+  --primary: 0 0% 20%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 0 0% 97%;
+  --secondary-foreground: 0 0% 20%;
+  --muted: 0 0% 97%;
+  --muted-foreground: 0 0% 56%;
+  --accent: 0 0% 97%;
+  --accent-foreground: 0 0% 20%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 92%;
+  --input: 0 0% 92%;
+  --ring: 0 0% 71%;
+  --chart-1: 25 95% 53%;
+  --chart-2: 200 100% 50%;
+  --chart-3: 260 95% 50%;
+  --chart-4: 30 100% 55%;
+  --chart-5: 160 89% 45%;
+  --sidebar: 0 0% 98%;
+  --sidebar-foreground: 0 0% 15%;
+  --sidebar-primary: 0 0% 20%;
+  --sidebar-primary-foreground: 0 0% 98%;
+  --sidebar-accent: 0 0% 97%;
+  --sidebar-accent-foreground: 0 0% 20%;
+  --sidebar-border: 0 0% 92%;
+  --sidebar-ring: 0 0% 71%;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* ESG Platform Dark Mode Colors */
+  --background: 218 16% 7%; /* #0F1117 */
+  --foreground: 210 40% 96%; /* #F1F5F9 */
+  --card: 215 16% 15%; /* #161B27 */
+  --card-foreground: 210 40% 96%; /* #F1F5F9 */
+  --popover: 215 16% 15%; /* #161B27 */
+  --popover-foreground: 210 40% 96%; /* #F1F5F9 */
+  --primary: 172 66% 50%; /* #2DD4BF (teal accent) */
+  --primary-foreground: 218 16% 7%; /* #0F1117 */
+  --secondary: 215 28% 20%; /* #1E2535 (border/surface) */
+  --secondary-foreground: 210 40% 96%; /* #F1F5F9 */
+  --muted: 217 33% 17%; /* #1A1F2E (muted surface) */
+  --muted-foreground: 216 14% 40%; /* #64748B (muted text) */
+  --accent: 172 66% 50%; /* #2DD4BF (teal for approved status) */
+  --accent-foreground: 218 16% 7%; /* #0F1117 */
+  --destructive: 0 84% 60%; /* #EF4444 */
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 28% 20%; /* #1E2535 */
+  --input: 215 28% 20%; /* #1E2535 */
+  --ring: 172 66% 50%; /* #2DD4BF */
+  /* Status & Data Colors */
+  --chart-1: 172 66% 50%; /* Jade/Approved */
+  --chart-2: 196 100% 50%; /* Sky/Candidate */
+  --chart-3: 0 84% 60%; /* Red/Rejected */
+  --chart-4: 38 92% 50%; /* Amber/Warning */
+  --chart-5: 240 100% 50%; /* Blue/Processing */
+  --sidebar: 218 16% 10%; /* #131720 */
+  --sidebar-foreground: 210 40% 96%; /* #F1F5F9 */
+  --sidebar-primary: 172 66% 50%; /* #2DD4BF */
+  --sidebar-primary-foreground: 218 16% 7%; /* #0F1117 */
+  --sidebar-accent: 215 16% 15%; /* #161B27 */
+  --sidebar-accent-foreground: 210 40% 96%; /* #F1F5F9 */
+  --sidebar-border: 215 28% 20%; /* #1E2535 */
+  --sidebar-ring: 172 66% 50%; /* #2DD4BF */
 }
 
 @layer base {
@@ -122,5 +127,48 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  .grain {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' /%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23noiseFilter)' opacity='0.03'/%3E%3C/svg%3E");
+    background-attachment: fixed;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .text-pretty {
+    text-wrap: pretty;
+  }
+
+  /* Animated pulse for pipeline stages */
+  @keyframes pulse-slow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.6;
+    }
+  }
+
+  .animate-pulse-slow {
+    animation: pulse-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  /* Fade in animation */
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-in;
   }
 }

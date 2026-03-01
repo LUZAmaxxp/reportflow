@@ -106,8 +106,8 @@ export default function ConflictInboxPage({ initialData }: ConflictInboxPageProp
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Conflits</h1>
-        <p className="text-sm text-muted-foreground">
+        <h1 className="text-3xl font-bold tracking-tight text-foreground font-serif">Conflits</h1>
+        <p className="text-sm text-muted-foreground mt-1">
           {total} conflit{total !== 1 ? "s" : ""} trouvé{total !== 1 ? "s" : ""}
         </p>
       </div>
@@ -154,7 +154,7 @@ export default function ConflictInboxPage({ initialData }: ConflictInboxPageProp
 
       {/* Conflict list */}
       {conflicts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16">
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-card py-16">
           <p className="text-muted-foreground">Aucun conflit non résolu</p>
         </div>
       ) : (

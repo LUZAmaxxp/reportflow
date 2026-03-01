@@ -161,7 +161,7 @@ export default async function DocumentDetailPage({
     return (
       <div className="flex flex-col items-center justify-center py-12">
         <p className="text-muted-foreground">Document introuvable</p>
-        <Link href="/documents" className="mt-4 text-sm text-primary hover:underline">
+        <Link href="/documents" className="mt-4 text-sm text-accent hover:underline">
           Retour aux documents
         </Link>
       </div>
@@ -172,28 +172,28 @@ export default async function DocumentDetailPage({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
+          <h1 className="text-3xl font-bold tracking-tight text-foreground font-serif">
             {document.originalFilename}
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground mt-1">
             Détails du document
           </p>
         </div>
         <div className="flex gap-3 text-sm">
           <Link
             href={`/documents/${id}/review`}
-            className="text-primary hover:underline"
+            className="text-accent hover:underline"
           >
             File de révision
           </Link>
-          <Link href="/documents" className="text-sm text-primary hover:underline">
+          <Link href="/documents" className="text-sm text-accent hover:underline">
             ← Retour
           </Link>
         </div>
       </div>
 
       {observationList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16">
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-card py-16">
           <p className="text-muted-foreground">Aucune observation candidate pour ce document</p>
           <p className="mt-1 text-sm text-muted-foreground">
             Les observations apparaîtront une fois l&apos;extraction terminée.

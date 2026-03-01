@@ -82,16 +82,15 @@ export default function Sidebar({ role = "viewer" }: SidebarProps) {
   const showConflicts = role === "admin" || role === "editor";
 
   return (
-    <ShadcnSidebar collapsible="icon">
-      <SidebarHeader className="flex items-center px-4 py-3">
-        <span className="text-lg font-bold tracking-tight group-data-[collapsible=icon]:hidden">
+    <ShadcnSidebar collapsible="icon" className="bg-sidebar border-sidebar-border">
+      <SidebarHeader className="flex items-center px-4 py-3 border-b border-sidebar-border">
+        <span className="text-lg font-bold tracking-tight text-sidebar-foreground font-serif group-data-[collapsible=icon]:hidden">
           ReportFlow
         </span>
       </SidebarHeader>
-      <Separator />
-      <SidebarContent>
+      <SidebarContent className="bg-sidebar">
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+          <SidebarGroupLabel className="text-sidebar-foreground/60 text-xs uppercase">Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => (
@@ -127,8 +126,8 @@ export default function Sidebar({ role = "viewer" }: SidebarProps) {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter />
-      <SidebarRail />
+      <SidebarFooter className="bg-sidebar border-t border-sidebar-border" />
+      <SidebarRail className="bg-sidebar border-l border-sidebar-border" />
     </ShadcnSidebar>
   );
 }
