@@ -9,13 +9,13 @@ interface PipelineStatusBarProps {
 }
 
 const statusColors: Record<PipelineStatus, string> = {
-  uploaded: "bg-slate-400",
-  ocr_processing: "bg-blue-400",
-  ocr_done: "bg-blue-600",
-  embedding: "bg-indigo-400",
-  embedded: "bg-indigo-600",
-  extracting: "bg-amber-500",
-  review_ready: "bg-green-500",
+  uploaded: "bg-slate-600",
+  ocr_processing: "bg-blue-500",
+  ocr_done: "bg-cyan-500",
+  embedding: "bg-purple-500",
+  embedded: "bg-indigo-500",
+  extracting: "bg-orange-500",
+  review_ready: "bg-emerald-500",
   failed: "bg-red-500",
 };
 
@@ -37,9 +37,9 @@ export default function PipelineStatusBar({ documentsByStatus }: PipelineStatusB
 
   if (total === 0) {
     return (
-      <div className="rounded-lg border p-4">
-        <p className="text-sm font-medium mb-2">{fr.dashboard.pipelineStatus}</p>
-        <div className="h-4 rounded-full bg-muted" />
+      <div className="rounded-lg border border-border bg-card p-4">
+        <p className="text-sm font-medium text-foreground mb-2 font-serif">{fr.dashboard.pipelineStatus}</p>
+        <div className="h-4 rounded-full bg-muted/30" />
         <p className="text-xs text-muted-foreground mt-2">
           {fr.dashboard.noDocuments}
         </p>
@@ -48,8 +48,8 @@ export default function PipelineStatusBar({ documentsByStatus }: PipelineStatusB
   }
 
   return (
-    <div className="rounded-lg border p-4">
-      <p className="text-sm font-medium mb-2">{fr.dashboard.pipelineStatus}</p>
+    <div className="rounded-lg border border-border bg-card p-4">
+      <p className="text-sm font-medium text-foreground mb-2 font-serif">{fr.dashboard.pipelineStatus}</p>
       <TooltipProvider>
         <div className="flex h-4 overflow-hidden rounded-full">
           {statusOrder.map((status) => {
@@ -82,7 +82,7 @@ export default function PipelineStatusBar({ documentsByStatus }: PipelineStatusB
             <div key={status} className="flex items-center gap-1.5 text-xs">
               <div className={`h-2.5 w-2.5 rounded-full ${statusColors[status]}`} />
               <span className="text-muted-foreground">
-                {statusLabels[status]}: {count}
+                {statusLabels[status]}: <span className="text-foreground font-medium">{count}</span>
               </span>
             </div>
           );

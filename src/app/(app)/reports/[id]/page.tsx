@@ -111,13 +111,13 @@ export default function ReportDetailPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] -m-6">
+    <div className="flex h-[calc(100vh-4rem)] -m-6 bg-background">
       {/* Main content */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
-        <div className="border-b px-6 py-3 flex items-center justify-between">
+        <div className="border-b border-border bg-card px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-lg font-semibold">{report.title}</h1>
+            <h1 className="text-lg font-semibold text-foreground font-serif">{report.title}</h1>
             <Badge
               variant={report.status === "final" ? "default" : "secondary"}
             >
@@ -148,7 +148,7 @@ export default function ReportDetailPage() {
         </div>
 
         {/* Report iframe — Slice 5 AC: sandboxed iframe, no dangerouslySetInnerHTML */}
-        <div className="flex-1 p-4">
+        <div className="flex-1 p-4 bg-gradient-to-br from-background via-muted/20 to-background">
           {report.html_snapshot_url ? (
             <ReportIframe
               htmlSnapshotUrl={report.html_snapshot_url}

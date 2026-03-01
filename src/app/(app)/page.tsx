@@ -27,9 +27,11 @@ export default async function DashboardPage() {
 
   return (
     <section className="grid gap-6">
-      <h1 className="text-2xl font-bold tracking-tight">
-        {fr.dashboard.title}
-      </h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-3xl font-bold tracking-tight text-foreground font-serif">
+          {fr.dashboard.title}
+        </h1>
+      </div>
       <DashboardClient initialData={data} />
     </section>
   );

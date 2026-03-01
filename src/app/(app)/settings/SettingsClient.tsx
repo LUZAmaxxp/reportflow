@@ -64,9 +64,9 @@ export default function SettingsClient({ companyId, userId, role }: SettingsClie
       {/* Quick links */}
       <div className="grid gap-4 sm:grid-cols-2">
         {role === "admin" && (
-          <Card>
+          <Card className="bg-card border-border hover:border-accent/50 transition-colors">
             <CardContent className="flex items-center gap-3 py-4">
-              <UsersIcon className="h-5 w-5 text-muted-foreground" />
+              <UsersIcon className="h-5 w-5 text-accent" />
               <div className="flex-1">
                 <p className="text-sm font-medium">{fr.settings.teamManagement}</p>
                 <p className="text-xs text-muted-foreground">{fr.settings.teamDescription}</p>
@@ -78,9 +78,9 @@ export default function SettingsClient({ companyId, userId, role }: SettingsClie
           </Card>
         )}
 
-        <Card>
+        <Card className="bg-card border-border hover:border-accent/50 transition-colors">
           <CardContent className="flex items-center gap-3 py-4">
-            <FolderTreeIcon className="h-5 w-5 text-muted-foreground" />
+            <FolderTreeIcon className="h-5 w-5 text-accent" />
             <div className="flex-1">
               <p className="text-sm font-medium">{fr.settings.categoryManagement}</p>
               <p className="text-xs text-muted-foreground">{fr.settings.categoryDescription}</p>
@@ -96,9 +96,9 @@ export default function SettingsClient({ companyId, userId, role }: SettingsClie
       {role === "admin" && (
         <>
           <Separator />
-          <Card className="border-destructive/50">
+          <Card className="bg-card border-destructive/30 hover:border-destructive/50 transition-colors">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-destructive text-base">
+              <CardTitle className="flex items-center gap-2 text-destructive text-base font-serif">
                 <AlertTriangleIcon className="h-4 w-4" />
                 {fr.settings.dangerZone}
               </CardTitle>

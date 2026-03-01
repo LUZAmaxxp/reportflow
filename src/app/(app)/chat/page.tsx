@@ -13,9 +13,9 @@ export default async function ChatPage() {
   if (!session?.user) redirect("/login");
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] -m-6">
+    <div className="flex h-[calc(100vh-3.5rem)] -m-6 bg-background">
       <SessionSidebar />
-      <div className="flex-1 flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-background via-muted/20 to-background">
         <NewChatCTA />
       </div>
     </div>

@@ -156,10 +156,10 @@ export default async function ObservationsPage({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
+          <h1 className="text-3xl font-bold tracking-tight text-foreground font-serif">
             Observations
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground mt-1">
             {total} observation{total !== 1 ? "s" : ""} trouvée{total !== 1 ? "s" : ""}
           </p>
         </div>
@@ -175,12 +175,12 @@ export default async function ObservationsPage({
         {/* Observation grid */}
         <div className="flex-1 space-y-4">
           {observationList.length === 0 ? (
-            <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16">
+            <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-card py-16">
               <p className="text-muted-foreground">Aucune observation trouvée</p>
               {hasFilters && (
                 <Link
                   href="/observations"
-                  className="mt-2 text-sm text-primary hover:underline"
+                  className="mt-2 text-sm text-accent hover:underline"
                 >
                   Réinitialiser les filtres
                 </Link>

@@ -26,10 +26,10 @@ export default function Topbar({ companyName, userEmail }: TopbarProps) {
     : "RF";
 
   return (
-    <header className="flex h-14 items-center gap-2 border-b px-4">
+    <header className="flex h-14 items-center gap-2 border-b border-border bg-card px-4">
       <SidebarTrigger />
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex items-center gap-3">
         <NotificationBell />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
