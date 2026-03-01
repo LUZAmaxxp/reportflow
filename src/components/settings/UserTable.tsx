@@ -139,14 +139,14 @@ export default function UserTable({ currentUserId }: UserTableProps) {
             </TableRow>
           ) : (
             users.map((user) => (
-              <TableRow key={user.user_id}>
-                <TableCell className="font-medium">{user.email}</TableCell>
+              <TableRow key={user.user_id} className="border-border hover:bg-muted/20">
+                <TableCell className="font-medium text-accent">{user.email}</TableCell>
                 <TableCell>
                   <Select
                     value={user.role}
                     onValueChange={(val) => handleRoleChange(user.user_id, val)}
                   >
-                    <SelectTrigger className="w-[120px]">
+                    <SelectTrigger className="w-[120px] bg-muted/30 border-border">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -164,9 +164,9 @@ export default function UserTable({ currentUserId }: UserTableProps) {
                           <TrashIcon className="h-4 w-4" />
                         </Button>
                       </AlertDialogTrigger>
-                      <AlertDialogContent>
+                      <AlertDialogContent className="bg-card border-border">
                         <AlertDialogHeader>
-                          <AlertDialogTitle>{fr.users.deleteTitle}</AlertDialogTitle>
+                          <AlertDialogTitle className="text-foreground font-serif">{fr.users.deleteTitle}</AlertDialogTitle>
                           <AlertDialogDescription>
                             {fr.users.deleteDescription.replace("{email}", user.email)}
                           </AlertDialogDescription>

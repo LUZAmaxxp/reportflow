@@ -117,12 +117,12 @@ export default function DocumentsTable({
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   transition={{ duration: 0.15, delay: index * 0.04 }}
-                  className="hover:bg-muted/50 transition-colors duration-100 cursor-pointer border-b"
+                  className="hover:bg-muted/30 transition-colors duration-100 cursor-pointer border-b border-border"
                 >
                   <TableCell>
                     <Link
                       href={`/documents/${doc.documentId}`}
-                      className="font-medium text-primary hover:underline"
+                      className="font-medium text-accent hover:text-accent/80"
                     >
                       {doc.title}
                     </Link>

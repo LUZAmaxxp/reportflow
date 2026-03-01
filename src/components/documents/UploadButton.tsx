@@ -284,14 +284,14 @@ export default function UploadButton({ onUploadComplete }: UploadButtonProps) {
         if (!open) resetState();
       }}>
         <DialogTrigger asChild>
-          <Button>
+          <Button className="bg-accent hover:bg-accent/90 text-background">
             <Upload className="mr-2 size-4" />
             Importer un document
           </Button>
         </DialogTrigger>
-        <DialogContent>
+        <DialogContent className="bg-card border-border">
           <DialogHeader>
-            <DialogTitle>Importer un document</DialogTitle>
+            <DialogTitle className="text-foreground font-serif">Importer un document</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             {error && !isUploading && (
@@ -316,7 +316,7 @@ export default function UploadButton({ onUploadComplete }: UploadButtonProps) {
                   }}
                   className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
                     isDragging
-                      ? "border-primary bg-primary/5"
+                      ? "border-accent bg-accent/5"
                       : "border-border"
                   }`}
                 >
@@ -354,6 +354,7 @@ export default function UploadButton({ onUploadComplete }: UploadButtonProps) {
                 <Button
                   onClick={handleSubmit}
                   disabled={!selectedFile || isUploading}
+                  className="bg-accent hover:bg-accent/90 text-background"
                 >
                   {isUploading ? "Envoi en cours…" : "Importer"}
                 </Button>

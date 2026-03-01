@@ -51,19 +51,19 @@ export default function ConflictCard({ conflict, onOverrideSuccess }: ConflictCa
 
   return (
     <>
-      <Card>
+      <Card className="bg-card border-border hover:border-accent/30 transition-colors">
         <CardContent className="p-4 space-y-3">
           {/* Header row */}
           <div className="flex items-center gap-2 flex-wrap">
-            <Badge variant="outline" className="font-mono text-xs">
+            <Badge variant="outline" className="font-mono text-xs bg-muted/50 border-border">
               {conflict.normalizedKey}
             </Badge>
-            <Badge variant="secondary" className="text-xs">
+            <Badge variant="secondary" className="text-xs bg-muted/70 text-foreground">
               {matchMethodLabel}
             </Badge>
             <span className="text-xs text-muted-foreground">{period}</span>
             {conflict.resolutionStatus === "user_overridden" && (
-              <Badge className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+              <Badge className="text-xs bg-accent/20 text-accent">
                 Résolu manuellement
               </Badge>
             )}
@@ -72,8 +72,8 @@ export default function ConflictCard({ conflict, onOverrideSuccess }: ConflictCa
           {/* Side-by-side columns */}
           <div className="grid grid-cols-2 gap-4">
             {/* Winner column (green) */}
-            <div className={cn("rounded-md border p-3", "border-green-200 bg-green-50 dark:border-green-900/50 dark:bg-green-950/20")}>
-              <p className="text-xs font-semibold text-green-700 dark:text-green-400 mb-1">Gagnant</p>
+            <div className={cn("rounded-md border p-3", "border-emerald-500/30 bg-emerald-950/20")}>
+              <p className="text-xs font-semibold text-emerald-400 mb-1">Gagnant</p>
               {conflict.winningObservation ? (
                 <ObsColumn obs={conflict.winningObservation} />
               ) : (
@@ -82,8 +82,8 @@ export default function ConflictCard({ conflict, onOverrideSuccess }: ConflictCa
             </div>
 
             {/* Loser column (red) */}
-            <div className={cn("rounded-md border p-3", "border-red-200 bg-red-50 dark:border-red-900/50 dark:bg-red-950/20")}>
-              <p className="text-xs font-semibold text-red-700 dark:text-red-400 mb-1">Perdant</p>
+            <div className={cn("rounded-md border p-3", "border-red-500/30 bg-red-950/20")}>
+              <p className="text-xs font-semibold text-red-400 mb-1">Perdant</p>
               {conflict.losingObservations.map((loser) => (
                 <div key={loser.id} className="space-y-1">
                   <ObsColumn obs={loser} />

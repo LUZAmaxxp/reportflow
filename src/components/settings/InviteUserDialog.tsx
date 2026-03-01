@@ -79,9 +79,9 @@ export default function InviteUserDialog({ open, onOpenChange, onCreated }: Invi
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md bg-card border-border">
         <DialogHeader>
-          <DialogTitle>{fr.users.inviteTitle}</DialogTitle>
+          <DialogTitle className="text-foreground font-serif">{fr.users.inviteTitle}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit}>
           <div className="space-y-4 py-4">
@@ -115,10 +115,10 @@ export default function InviteUserDialog({ open, onOpenChange, onCreated }: Invi
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="border-border hover:bg-muted">
               {fr.common.cancel}
             </Button>
-            <Button type="submit" disabled={saving}>
+            <Button type="submit" disabled={saving} className="bg-accent hover:bg-accent/90 text-background">
               {saving ? fr.common.loading : fr.users.invite}
             </Button>
           </DialogFooter>

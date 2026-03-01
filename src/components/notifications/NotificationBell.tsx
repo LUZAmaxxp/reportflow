@@ -88,21 +88,20 @@ export default function NotificationBell() {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative">
-          <BellIcon className="h-5 w-5" />
+        <Button variant="ghost" size="icon" className="relative hover:bg-muted/50">
+          <BellIcon className="h-5 w-5 text-foreground" />
           {unreadCount > 0 && (
             <Badge
-              variant="destructive"
-              className="absolute -top-1 -right-1 h-5 min-w-[20px] rounded-full px-1 text-xs"
+              className="absolute -top-1 -right-1 h-5 min-w-[20px] rounded-full px-1 text-xs bg-red-500 text-white"
             >
               {unreadCount > 99 ? "99+" : unreadCount}
             </Badge>
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 p-0">
-        <div className="flex items-center justify-between border-b px-4 py-2">
-          <span className="text-sm font-semibold">Notifications</span>
+      <PopoverContent align="end" className="w-80 p-0 bg-card border-border">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2">
+          <span className="text-sm font-semibold text-foreground font-serif">Notifications</span>
           {unreadCount > 0 && (
             <Button
               variant="ghost"
