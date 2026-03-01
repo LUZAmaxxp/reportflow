@@ -1,0 +1,1636 @@
+{
+  "slice": 5,
+  "title": "Chat → MCP Tools → Manual Obs Popup → Report → PDF + Redis-Backed SSE Replay",
+  "description": "Implements end-to-end chat-driven report generation with Redis Streams-backed SSE replay, MCP tool orchestration, pending manual-observation lifecycle, report listing/detail/versioning/regeneration, and a dedicated PDF worker that renders sanitized HTML to PDF and updates report readiness.",
+  "depends_on_slices": [
+    3,
+    4
+  ],
+  "env_vars_required": [
+    {
+      "key": "DATABASE_URL",
+      "description": "PostgreSQL 16 primary DB connection used by Next.js app and PDF worker metadata updates.",
+      "example": "postgresql://user:pass@localhost:5432/reportflow"
+    },
+    {
+      "key": "REDIS_URL",
+      "description": "Redis for BullMQ queues, Redis Streams replay buffer, and pub/sub channels pending-obs/report-pdf notifications.",
+      "example": "redis://localhost:6379"
+    },
+    {
+      "key": "R2_ACCOUNT_ID",
+      "description": "Cloudflare R2 account for presigned URL generation and object operations.",
+      "example": "abc123def456"
+    },
+    {
+      "key": "R2_ACCESS_KEY_ID",
+      "description": "R2 access key for HTML/PDF uploads and reads.",
+      "example": "R2ACCESSKEYEXAMPLE"
+    },
+    {
+      "key": "R2_SECRET_ACCESS_KEY",
+      "description": "R2 secret key for object operations.",
+      "example": "R2SECRETEXAMPLE"
+    },
+    {
+      "key": "R2_BUCKET_NAME",
+      "description": "Bucket storing report HTML snapshots and generated PDFs.",
+      "example": "reportflow-prod"
+    },
+    {
+      "key": "XAI_API_KEY",
+      "description": "Grok streaming generation and tool-driven response orchestration.",
+      "example": "xai-xxxxxxxx"
+    },
+    {
+      "key": "OPENAI_API_KEY",
+      "description": "OpenAI text-embedding-3-small for search_evidence hybrid retrieval path reuse.",
+      "example": "sk-xxxxxxxx"
+    },
+    {
+      "key": "MEM0_API_KEY",
+      "description": "Reads/writes user/company/client scoped style preferences for generation/regeneration.",
+      "example": "mem0-xxxxxxxx"
+    },
+    {
+      "key": "NEXTAUTH_URL",
+      "description": "Auth.js origin for JWT session handling.",
+      "example": "http://localhost:3000"
+    },
+    {
+      "key": "NEXTAUTH_SECRET",
+      "description": "Auth.js JWT signing secret.",
+      "example": "base64-32-byte-secret"
+    },
+    {
+      "key": "AUTH_TRUST_HOST",
+      "description": "Auth.js reverse-proxy trust flag.",
+      "example": "true"
+    },
+    {
+      "key": "PDF_WORKER_URL",
+      "description": "Optional direct health-check URL for PDF worker; queue communication still uses Redis.",
+      "example": "http://localhost:3001"
+    },
+    {
+      "key": "NEXT_PUBLIC_APP_URL",
+      "description": "Frontend base URL for internal links and UI navigation.",
+      "example": "http://localhost:3000"
+    },
+    {
+      "key": "PUPPETEER_EXECUTABLE_PATH",
+      "description": "Chromium executable path in PDF worker container.",
+      "example": "/usr/bin/chromium"
+    },
+    {
+      "key": "PUPPETEER_SKIP_DOWNLOAD",
+      "description": "Prevents Puppeteer from downloading bundled Chromium in container builds.",
+      "example": "true"
+    }
+  ],
+  "packages_to_install": [
+    {
+      "name": "isomorphic-dompurify",
+      "version": "latest",
+      "dev": false
+    },
+    {
+      "name": "puppeteer",
+      "version": "22.x",
+      "dev": false
+    },
+    {
+      "name": "react-markdown",
+      "version": "latest",
+      "dev": false
+    }
+  ],
+  "files": [
+    {
+      "action": "create",
+      "path": "src/app/api/chat/sessions/route.ts",
+      "purpose": "Create and list user-scoped chat sessions.",
+      "sections": [
+        {
+          "label": "Handlers",
+          "content": "Implements POST /api/chat/sessions with empty body, creates chat_session row with title 'Nouvelle conversation', returns { session_id, created_at }. Implements GET /api/chat/sessions paginated listing sorted by updated_at DESC default limit 20 with message_count aggregation per session."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/chat/sessions/[id]/route.ts",
+      "purpose": "Delete a chat session and cascade messages.",
+      "sections": [
+        {
+          "label": "Delete",
+          "content": "Implements DELETE /api/chat/sessions/{id}; validates ownership (ChatSession.user_id = ctx.userId), relies on FK ON DELETE CASCADE for chat_message cleanup, returns 204 No Content."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/chat/sessions/[id]/messages/route.ts",
+      "purpose": "Create a user message and dispatch asynchronous agent turn.",
+      "sections": [
+        {
+          "label": "Post Message",
+          "content": "Implements POST /api/chat/sessions/{id}/messages with body { text }. Validates 1..4000 chars and session ownership, inserts chat_message role=user type=user_text content={text}, updates chat_session.title on first message to 60-char truncation, updates updated_at, dispatches agent loop asynchronously without awaiting, returns 202 { message_id }."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/chat/sessions/[id]/stream/route.ts",
+      "purpose": "Serve persistent text/event-stream with replay support.",
+      "sections": [
+        {
+          "label": "SSE",
+          "content": "Implements GET stream. Reads Last-Event-ID header, replays missed events from Redis Stream via XRANGE, subscribes to new events via XREAD BLOCK 0 COUNT 10, forwards SSE frames with stream ID as id, unsubscribes on disconnect, leaves stream key alive until TTL expiry after done."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/manual-observations/pending/[id]/route.ts",
+      "purpose": "Poll pending manual observation status.",
+      "sections": [
+        {
+          "label": "Pending State",
+          "content": "Implements GET returning { pending_id, status, observation_id, created_at, expires_at }. Returns 404 { code: 'pending_not_found' } for missing or expired records."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/manual-observations/pending/[id]/confirm/route.ts",
+      "purpose": "Confirm pending observation and create manual approved observation + attestation.",
+      "sections": [
+        {
+          "label": "Confirm",
+          "content": "Implements POST confirm. Validates terminal-state guard (must be pending), validates full popup schema (label, normalized_key, value, unit, data_type, time_behavior, periodic dates, optional category_id/source_reference/note), inserts attestation_record and manual observation status=approved, updates pending status=confirmed + observation_id, publishes pending-obs:{pending_id} message with { status:'confirmed', observation_id }, returns { observation_id, status:'approved' }. Returns 409 on non-pending."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/manual-observations/pending/[id]/skip/route.ts",
+      "purpose": "Skip pending observation and resume agent.",
+      "sections": [
+        {
+          "label": "Skip",
+          "content": "Implements POST skip; validates record is pending then updates to skipped, publishes pending-obs:{pending_id} { status:'skipped' }, returns 200 status payload; returns 409 on non-pending."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/reports/route.ts",
+      "purpose": "List reports without html snapshot URL.",
+      "sections": [
+        {
+          "label": "List Reports",
+          "content": "Implements GET /api/reports with filters client_id/status and default sort generated_at DESC. Response item fields exactly: report_id, version, status, language, generated_at, client_id, source_report_id. Explicitly excludes html_snapshot_url to resolve RISK-15."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/reports/[id]/route.ts",
+      "purpose": "Get single report with freshly-presigned URLs.",
+      "sections": [
+        {
+          "label": "Report Detail",
+          "content": "Implements GET /api/reports/{id}. Generates html_snapshot_url from report.html_snapshot_r2_key with 3600s expiry each request. Returns pdf_url as null when pdf_r2_key null, otherwise presigned 3600s URL. Validates tenant ownership."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/reports/[id]/versions/route.ts",
+      "purpose": "Return lineage chain for report versions.",
+      "sections": [
+        {
+          "label": "Version Chain",
+          "content": "Implements GET /api/reports/{id}/versions returning ascending version list { report_id, version, source_report_id, generated_at, status, language } by traversing lineage root or querying shared root."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/reports/[id]/regenerate/route.ts",
+      "purpose": "Trigger report regeneration with optional style memory write.",
+      "sections": [
+        {
+          "label": "Regenerate",
+          "content": "Implements POST regenerate with body { style_instruction<=500, client_id?, language? }. Validates source ownership, optional mem0 write (5s timeout + 1 retry; continue on failure), resolves chat session from X-Chat-Session-Id header or creates new one, enqueues agent-loop mode=regenerate (pre-seeded observation_ids and derivation_result_ids), returns { report_id, version, session_id, html_snapshot_url, pdf_url|null }. Returns 409 { code:'generation_in_progress' } when active regeneration exists."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/agent/loop.ts",
+      "purpose": "Core orchestration loop for tool-calling and report generation.",
+      "sections": [
+        {
+          "label": "Flow",
+          "content": "Implements sequence: emit tool_call preferences, get_preferences, identify sections, search_observations then search_evidence fallback, propose_manual_observation + await pending-obs pub/sub max 10 min, compute_derivation rollups, Grok stream tokens, create_report, render_pdf, emit report_ready then done. Errors emit error event and write ChatMessage(type=error)."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/agent/streaming.ts",
+      "purpose": "Stream Grok tokens and persist assistant messages.",
+      "sections": [
+        {
+          "label": "Streaming",
+          "content": "Reads token chunks from Grok response stream, emits token SSE events to session buffer, accumulates complete assistant text, writes one chat_message type=agent_text on completion, then done event."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/agent/session-buffer.ts",
+      "purpose": "Redis Streams-backed per-session replay buffer.",
+      "sections": [
+        {
+          "label": "Replay Buffer",
+          "content": "Uses Redis Stream key sse:chat:{session_id}. Appends events with XADD MAXLEN ~ 200. Replays with XRANGE using Last-Event-ID + 1. Reads live with XREAD BLOCK. Sets EXPIRE 60 after done event."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/index.ts",
+      "purpose": "MCP registry and guarded dispatcher.",
+      "sections": [
+        {
+          "label": "Dispatch",
+          "content": "Exports toolDispatch(toolName,input,ctx). Validates toolName exists else returns { error:'unknown_tool' }. Injects ctx.companyId into all tool implementations; tool inputs contain no company_id. Wraps calls in try/catch and propagates retryable vs fatal errors for agent loop."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/search-observations.ts",
+      "purpose": "Fetch approved or filtered observations for agent reasoning.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input { query, filters? }. Output { observations }. Applies tenant scoping and filters category_id, normalized_key, period range, status; returns Observation-compatible records."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/search-evidence.ts",
+      "purpose": "Hybrid retrieval for evidence blocks.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input { query, filters? }. Output blocks with block_id, document_version_id, page_number, bbox, text, document_title, category_path, score. Reuses Slice 3 hybrid retrieval (dense+sparse RRF) and scopes by ctx.companyId."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/compute-derivation.ts",
+      "purpose": "Compute or reuse derivation results with coverage semantics.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input observation_ids + operation + optional expected_periods. Validates approved-only observations, numeric/unit compatibility, ratio non-zero denominator, computes coverage fraction when expected_periods provided, enforces insufficient_coverage signaling below 0.50, caches by SHA256(sorted IDs + operation + companyId), returns status fresh|reused and stale flag."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/propose-manual-observation.ts",
+      "purpose": "Create pending manual observation and notify UI.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input suggested fields, creates pending_manual_observation row with expires_at +10 minutes, emits manual_obs_request SSE payload with pending_id and prefilled fields, schedules per-record delayed timeout and relies on repeatable safety sweep."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/create-report.ts",
+      "purpose": "Persist report metadata and HTML snapshot in R2.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Validates html_content <= 2MB, validates observation_ids approved and derivation_result_ids owned by ctx.companyId, uploads HTML to {company_id}/reports/{report_id}/snapshot.html, inserts report row with html_snapshot_r2_key, style_snapshot from mem0 preferences, source_report_id support for regeneration, returns report metadata with fresh html_snapshot_url."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/render-pdf.ts",
+      "purpose": "Enqueue PDF rendering and await readiness with timeout fallback.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Validates report ownership and html snapshot presence, enqueues render-pdf-job with output key {company_id}/reports/{report_id}/report.pdf, waits via Redis pub/sub render-pdf:{report_id} up to 90s, falls back to polling report.pdf_r2_key every 2s, returns { pdf_url, report_id } or { error:'render_timeout' }."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/get-categories.ts",
+      "purpose": "Return nested category tree to agent.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input {} output categories array with category_id,name,path,parent_category_id,children[], scoped to ctx.companyId."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/merge-observations.ts",
+      "purpose": "Bulk merge observation keys/labels.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input observation_ids + canonical fields, updates approved observations in company scope and writes one audit_log row per updated observation, returns updated_count."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/get-report-data.ts",
+      "purpose": "Load report plus linked observations and derivations.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input { report_id } output { report, observations, derivations } after tenant validation."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/mcp/get-preferences.ts",
+      "purpose": "Load mem0 preferences with degraded timeout mode.",
+      "sections": [
+        {
+          "label": "Contract",
+          "content": "Input { user_id, client_id? } output { preferences }. Uses scope user_id + company_id + optional client_id. On mem0 read timeout at 3s returns empty object and continues."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pdf/index.ts",
+      "purpose": "PDF worker entry with health endpoint and BullMQ consumer.",
+      "sections": [
+        {
+          "label": "Worker",
+          "content": "Bootstraps Redis/BullMQ worker for render-pdf-job, initializes Puppeteer pool, exposes /health on port 3003 internally (Docker maps host port 3001 to container port 3003 per docker-compose, so PDF_WORKER_URL=http://localhost:3001 is correct for callers outside the container) returning { status:'ok', pool_size, active_renders }, and handles graceful shutdown."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pdf/jobs/render.ts",
+      "purpose": "Render HTML snapshot to PDF and persist result key.",
+      "sections": [
+        {
+          "label": "Job Steps",
+          "content": "Fetch HTML from R2, sanitize via DOMPurify forbidden tags/attrs policy, reject if >5% content stripped, render with Puppeteer page.pdf({format:'A4',printBackground:true}), upload to R2 output_r2_key, update report.pdf_r2_key, publish render-pdf:{report_id} completion message, release browser."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pdf/pool.ts",
+      "purpose": "Puppeteer pool lifecycle and timeout controls.",
+      "sections": [
+        {
+          "label": "Pool",
+          "content": "Maintains max 3 concurrent browser instances, tracks per-instance render count and restarts after 50 renders, enforces per-render 30s timeout via Promise.race, raises retriable failures for BullMQ attempt handling."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pdf/Dockerfile",
+      "purpose": "Dedicated deployable image for PDF worker.",
+      "sections": [
+        {
+          "label": "Container",
+          "content": "Uses node:20-slim, installs chromium + runtime libs, sets PUPPETEER_EXECUTABLE_PATH and PUPPETEER_SKIP_DOWNLOAD, installs prod deps, copies worker and lib modules, EXPOSE 3003 (Docker maps host 3001:3003 per docker-compose, so PDF_WORKER_URL=http://localhost:3001 is correct for callers outside the container), defines healthcheck and node --max-old-space-size=512 command."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/chat/page.tsx",
+      "purpose": "Chat landing page with session sidebar and active/new session area.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Renders session list and empty-state prompts. Supports creating a session and navigating to /chat/[sessionId]."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/chat/[sessionId]/page.tsx",
+      "purpose": "Active session chat page.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Loads session metadata, message history, and mounts ChatShell with SSE stream lifecycle and reconnect semantics."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/reports/page.tsx",
+      "purpose": "Reports list UI.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Displays paginated reports from GET /api/reports with filters client_id/status and French empty state CTA to /chat."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/reports/[id]/page.tsx",
+      "purpose": "Report detail and regeneration controls.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Loads report detail with fresh presigned html_snapshot_url and pdf_url, renders sandboxed iframe, version sidebar, regenerate dialog, and 3s polling while pdf_url is null."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/chat/ChatShell.tsx",
+      "purpose": "Main chat interaction shell.",
+      "sections": [
+        {
+          "label": "Behavior",
+          "content": "Maintains messages and streaming state, consumes token/tool_call/manual_obs_request/report_ready/error/done events, manages Last-Event-ID reconnect, disables input while manual popup active, shows typing indicator."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/chat/MessageBubble.tsx",
+      "purpose": "Type-dispatched message renderer.",
+      "sections": [
+        {
+          "label": "Rendering",
+          "content": "Renders user_text right aligned plain text, agent_text left markdown with streaming cursor, delegates other message types to specialized cards."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/chat/ToolCallCard.tsx",
+      "purpose": "Collapsed card for tool invocation messages.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Shows tool_name and summary by default with optional expandable details object."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/chat/ManualObsCard.tsx",
+      "purpose": "Inline card for manual observation requests.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Displays pending requirement and CTA opening ManualObsPopup for pending_id."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/chat/ReportReadyCard.tsx",
+      "purpose": "Card for completed report generation.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Provides 'Voir le rapport' navigation and PDF download action if pdf_url present."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/chat/SessionSidebar.tsx",
+      "purpose": "List and create chat sessions.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Renders paginated sessions with updated_at ordering and button 'Nouvelle conversation'."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/chat/ManualObsPopup.tsx",
+      "purpose": "Modal form for pending manual observation completion.",
+      "sections": [
+        {
+          "label": "Form",
+          "content": "Implements all popup fields/validations, 10-minute countdown, confirm and skip actions, banner state for disabled chat input, timeout toast auto-close behavior."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/reports/ReportIframe.tsx",
+      "purpose": "Safe report HTML preview component.",
+      "sections": [
+        {
+          "label": "Security",
+          "content": "Renders iframe with sandbox='allow-scripts allow-same-origin' and never uses dangerouslySetInnerHTML."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/reports/VersionSidebar.tsx",
+      "purpose": "Version lineage and regeneration entry point.",
+      "sections": [
+        {
+          "label": "UI",
+          "content": "Lists report versions ordered ascending and provides regenerate dialog trigger with style_instruction input."
+        }
+      ]
+    }
+  ],
+  "database_migrations": [],
+  "api_endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/chat/sessions",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": null,
+      "query_params": null,
+      "validation_rules": [
+        "Authenticated session required",
+        "user_id and company_id derived from Auth.js JWT claims"
+      ],
+      "success_response": {
+        "status": 201,
+        "body": {
+          "session_id": "uuid",
+          "created_at": "iso8601"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid Auth.js session"
+        }
+      ],
+      "implementation_notes": [
+        "Uses src/lib/auth.ts::auth() for ctx extraction with JWT shape { user_id, company_id, role }.",
+        "Insert targets drizzle/migrations/0006_report_chat_notification.sql::chat_session and respects char_length(title)<=200.",
+        "DB calls wrapped with src/lib/db/rls.ts::withTenant to enforce tenant policy from drizzle/migrations/0007_async_audit_rls.sql::tenant_isolation."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/sessions",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": null,
+      "query_params": {
+        "page": "number?",
+        "limit": "number? default 20"
+      },
+      "validation_rules": [
+        "page >= 1",
+        "1 <= limit <= 100",
+        "user can list only own sessions"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [
+            {
+              "session_id": "uuid",
+              "title": "string",
+              "created_at": "iso8601",
+              "updated_at": "iso8601",
+              "message_count": 0
+            }
+          ],
+          "page": 1,
+          "pageSize": 20
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        }
+      ],
+      "implementation_notes": [
+        "Reads from drizzle/migrations/0006_report_chat_notification.sql::chat_session and ::chat_message with index (user_id, created_at DESC).",
+        "Sort defaults to updated_at DESC as specified in Slice 5 §5.3.",
+        "Depends on Slice 1 schema file src/lib/db/schema/notifications.ts symbols for ChatSession and ChatMessage tables."
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/chat/sessions/{id}",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "id must be UUID",
+        "session must belong to ctx.userId"
+      ],
+      "success_response": {
+        "status": 204,
+        "body": {}
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "session_not_found",
+          "condition": "Session missing or not owned by user"
+        }
+      ],
+      "implementation_notes": [
+        "Relies on FK cascade from drizzle/migrations/0006_report_chat_notification.sql::chat_message.session_id ON DELETE CASCADE.",
+        "Ownership check via chat_session.user_id = ctx.userId (Slice 5 §5.17)."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/chat/sessions/{id}/messages",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": {
+        "text": "string"
+      },
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "text required",
+        "1 <= text.length <= 4000",
+        "session ownership required",
+        "title update only for first message",
+        "response must be immediate async dispatch"
+      ],
+      "success_response": {
+        "status": 202,
+        "body": {
+          "message_id": "uuid"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 400,
+          "code": "invalid_body",
+          "condition": "Missing or malformed text"
+        },
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "session_not_found",
+          "condition": "Session missing or not owned by user"
+        },
+        {
+          "status": 422,
+          "code": "text_too_long",
+          "condition": "text length > 4000"
+        }
+      ],
+      "implementation_notes": [
+        "Writes chat_message with type user_text using shape from Slice 5 §5.13 and enum drizzle/migrations/0001_foundation.sql::chat_message_type user_text.",
+        "Asynchronous agent dispatch resolves RISK-03 and depends on src/lib/agent/loop.ts::runAgentLoop.",
+        "Queue timeout alignment references src/lib/queues.ts queue defaults from Slice 1 §1.7 (all six queue timeouts)."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/sessions/{id}/messages",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": {
+        "page": "number?",
+        "limit": "number?"
+      },
+      "validation_rules": [
+        "session ownership required",
+        "content shape validated against type-discriminated schema"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [
+            {
+              "message_id": "uuid",
+              "type": "user_text|agent_text|agent_tool_call|manual_obs_request|report_ready|error",
+              "content": {}
+            }
+          ],
+          "page": 1,
+          "pageSize": 50
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "session_not_found",
+          "condition": "Session missing or not owned"
+        }
+      ],
+      "implementation_notes": [
+        "RISK-09 resolution uses strict per-type content contracts from Slice 5 §5.13.",
+        "Reads from Slice 1 table definition drizzle/migrations/0006_report_chat_notification.sql::chat_message(content jsonb).",
+        "Canonical public contract remains /api/chat/sessions/{id}/messages per Slice 5 §5.3 and §5.19 reconnect fallback behavior."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/sessions/{id}/stream",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "session ownership required",
+        "Last-Event-ID optional",
+        "SSE Content-Type text/event-stream"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "stream": "SSE events: token|tool_call|manual_obs_request|report_ready|error|done"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "session_not_found",
+          "condition": "Session missing or not owned"
+        }
+      ],
+      "implementation_notes": [
+        "Implements Redis Streams replay using XADD/XRANGE/XREAD on key sse:chat:{session_id} per Slice 5 §5.4.",
+        "Uses src/lib/redis.ts::redis and dedicated subscriber client pattern introduced in Slice 1 §1.7.",
+        "This supersedes Slice 2 in-memory replay model for chat stream and resolves RISK-03 under horizontal scaling."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/manual-observations/pending/{id}",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "pending_id must exist",
+        "pending record must belong to ctx.companyId",
+        "expired record returns not found"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "pending_id": "uuid",
+          "status": "pending|confirmed|skipped|timeout",
+          "observation_id": "uuid|null",
+          "created_at": "iso8601",
+          "expires_at": "iso8601"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "pending_not_found",
+          "condition": "pending_id missing or expired"
+        }
+      ],
+      "implementation_notes": [
+        "Uses Slice 1 table drizzle/migrations/0007_async_audit_rls.sql::pending_manual_observation.",
+        "RISK-04 response shape enforced exactly with status and observation_id semantics.",
+        "Ownership guard mirrors Slice 5 §5.17 PendingManualObservation security requirement."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/manual-observations/pending/{id}/confirm",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": {
+        "label": "string",
+        "normalized_key": "string",
+        "value": "string",
+        "unit": "string?",
+        "data_type": "enum",
+        "time_behavior": "enum",
+        "period_start": "date?",
+        "period_end": "date?",
+        "category_id": "uuid?",
+        "source_reference": "string?",
+        "note": "string?"
+      },
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "pending_id exists and status is pending",
+        "label required max 200",
+        "normalized_key snake_case max 100",
+        "value required",
+        "unit optional max 50",
+        "source_reference max 500",
+        "note max 1000",
+        "period_start and period_end required when time_behavior=periodic",
+        "period_end >= period_start",
+        "category_id if present belongs to ctx.companyId"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "observation_id": "uuid",
+          "status": "approved"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "pending_not_found",
+          "condition": "pending_id missing or expired"
+        },
+        {
+          "status": 409,
+          "code": "pending_not_pending",
+          "condition": "pending status already confirmed/skipped/timeout"
+        },
+        {
+          "status": 422,
+          "code": "validation_error",
+          "condition": "Body validation failed"
+        }
+      ],
+      "implementation_notes": [
+        "Creates observation and attestation using Slice 1 symbols: drizzle/migrations/0004_fact_layer.sql::observation and ::attestation_record.",
+        "Uses enum values from drizzle/migrations/0001_foundation.sql::data_type_enum and ::time_behavior_enum.",
+        "Publishes pub/sub update to pending-obs:{pending_id} so src/lib/agent/loop.ts waiting branch unblocks immediately."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/manual-observations/pending/{id}/skip",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "pending_id exists and status is pending"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "pending_id": "uuid",
+          "status": "skipped"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "pending_not_found",
+          "condition": "pending_id missing or expired"
+        },
+        {
+          "status": 409,
+          "code": "pending_not_pending",
+          "condition": "Already terminal state"
+        }
+      ],
+      "implementation_notes": [
+        "Updates Slice 1 table drizzle/migrations/0007_async_audit_rls.sql::pending_manual_observation status and emits pending-obs channel message.",
+        "Agent treats skipped and timed_out identically per Slice 5 §5.8 fallback logic."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": null,
+      "query_params": {
+        "client_id": "uuid?",
+        "status": "draft|final?",
+        "sort": "generated_at:desc default",
+        "page": "number?",
+        "limit": "number?"
+      },
+      "validation_rules": [
+        "sort defaults to generated_at:desc",
+        "report scope limited to ctx.companyId",
+        "html_snapshot_url excluded from list payload"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [
+            {
+              "report_id": "uuid",
+              "version": 1,
+              "status": "draft|final",
+              "language": "string",
+              "generated_at": "iso8601",
+              "client_id": "uuid|null",
+              "source_report_id": "uuid|null"
+            }
+          ],
+          "page": 1,
+          "pageSize": 20
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        }
+      ],
+      "implementation_notes": [
+        "Uses Slice 1 table drizzle/migrations/0006_report_chat_notification.sql::report.",
+        "RISK-15 resolution explicitly omits html_snapshot_url from list response and avoids presign generation at list time.",
+        "Client filters align with Slice 6 client CRUD entity introduced in src/app/api/clients routes."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/{id}",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "report must belong to ctx.companyId",
+        "html_snapshot_r2_key must exist for presign",
+        "pdf_url null allowed when rendering incomplete"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "report_id": "uuid",
+          "version": 1,
+          "status": "draft|final",
+          "language": "string",
+          "html_snapshot_url": "url",
+          "pdf_url": "url|null",
+          "source_report_id": "uuid|null"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "report_not_found",
+          "condition": "Report missing or out of tenant scope"
+        }
+      ],
+      "implementation_notes": [
+        "Presign source keys: drizzle/migrations/0006_report_chat_notification.sql::report.html_snapshot_r2_key and ::report.pdf_r2_key.",
+        "R2 client dependency from src/lib/r2.ts singleton established in Slice 1.",
+        "Front-end recovers expired report_ready URLs by re-calling this endpoint as defined in Slice 5 §5.13."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/{id}/versions",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "report lineage must be within ctx.companyId",
+        "order by version ASC"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "versions": [
+            {
+              "report_id": "uuid",
+              "version": 1,
+              "source_report_id": null,
+              "generated_at": "iso8601",
+              "status": "draft|final",
+              "language": "string"
+            }
+          ]
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 404,
+          "code": "report_not_found",
+          "condition": "Lineage root cannot be resolved in tenant scope"
+        }
+      ],
+      "implementation_notes": [
+        "Lineage uses self FK drizzle/migrations/0006_report_chat_notification.sql::report.source_report_id.",
+        "Acceptance in Slice 5 requires chain output after regeneration with v1 null source and v2 referencing v1."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/reports/{id}/regenerate",
+      "auth_required": true,
+      "roles_allowed": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "request_body": {
+        "style_instruction": "string? max 500",
+        "client_id": "uuid?",
+        "language": "bcp47?"
+      },
+      "path_params": {
+        "id": "uuid"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "report belongs to ctx.companyId",
+        "style_instruction max 500",
+        "X-Chat-Session-Id header optional",
+        "return/allocate session_id always",
+        "prevent concurrent generation"
+      ],
+      "success_response": {
+        "status": 201,
+        "body": {
+          "report_id": "uuid",
+          "version": 2,
+          "session_id": "uuid",
+          "html_snapshot_url": "url",
+          "pdf_url": "url|null"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "unauthorized",
+          "condition": "No valid session"
+        },
+        {
+          "status": 403,
+          "code": "forbidden",
+          "condition": "Source report company mismatch"
+        },
+        {
+          "status": 404,
+          "code": "report_not_found",
+          "condition": "Source report missing"
+        },
+        {
+          "status": 409,
+          "code": "generation_in_progress",
+          "condition": "Existing active regeneration job"
+        },
+        {
+          "status": 422,
+          "code": "validation_error",
+          "condition": "Invalid body fields"
+        }
+      ],
+      "implementation_notes": [
+        "Depends on Slice 1 tables chat_session and report for session provisioning + version linkage.",
+        "Regeneration writes mem0 preferences under scope model introduced in Slice 4 and §8 memory architecture.",
+        "Dispatches to BullMQ queue agent-loop out-of-band while render-pdf-job uses timeout 90_000 from src/lib/queues.ts constants table in Slice 1 §1.7.",
+        "Pipeline SSE notification event type report_ready from Slice 4 §4.7 can short-circuit report detail polling in UI."
+      ]
+    }
+  ],
+  "background_jobs": [
+    {
+      "queue": "agent-loop",
+      "job_name": "run_agent_loop",
+      "trigger": "POST /api/chat/sessions/{id}/messages and POST /api/reports/{id}/regenerate dispatch asynchronous agent execution per Slice 5 §5.3 and §5.12.",
+      "payload_schema": {
+        "session_id": "uuid",
+        "user_message_id": "uuid|null",
+        "mode": "normal|regenerate",
+        "report_id": "uuid|null",
+        "observation_ids": "uuid[]?",
+        "derivation_result_ids": "uuid[]?"
+      },
+      "timeout_ms": 0,
+      "retry_attempts": 1,
+      "steps": [
+        {
+          "step": 1,
+          "label": "Load context",
+          "detail": "Load chat_session and authenticated context, then enforce ownership with chat_session.user_id and tenant scope from src/lib/db/rls.ts::withTenant (Slice 5 §5.17; Slice 1 RLS model)."
+        },
+        {
+          "step": 2,
+          "label": "Execute tool loop",
+          "detail": "Run src/lib/agent/loop.ts orchestration with MCP tools from src/lib/mcp/index.ts; all tool calls derive company scope from AgentContext.companyId (RISK-08, Slice 5 §5.6-§5.7)."
+        },
+        {
+          "step": 3,
+          "label": "Handle manual observation waits",
+          "detail": "If propose_manual_observation is emitted, wait on Redis pub/sub pending-obs:{pending_id} up to 10 minutes; pending-obs-timeout queue provides terminal-state unblocking safety net per Slice 5 §5.8."
+        },
+        {
+          "step": 4,
+          "label": "Generate report artifacts",
+          "detail": "Call create_report then render_pdf; render_pdf enqueues render-pdf-job and waits with pub/sub plus DB poll fallback up to 90 seconds per Slice 5 §5.7."
+        },
+        {
+          "step": 5,
+          "label": "Stream and persist outputs",
+          "detail": "Append SSE events to Redis Stream sse:chat:{session_id} (XADD/XRANGE/XREAD) and persist final ChatMessage content shapes from Slice 5 §5.13."
+        }
+      ],
+      "error_handling": [
+        "On non-retryable tool failure, emit SSE error event and persist ChatMessage(type=error, content={ message, retryable }) as defined in Slice 5 §5.13 and §5.19.",
+        "On render timeout, return { error:'render_timeout' } from render_pdf path and continue with HTML snapshot fallback per Slice 5 §5.7 and §5.19."
+      ]
+    },
+    {
+      "queue": "render-pdf-job",
+      "job_name": "render_report_pdf",
+      "trigger": "MCP tool render_pdf called from agent loop after create_report completes.",
+      "payload_schema": {
+        "report_id": "uuid",
+        "html_r2_key": "string",
+        "output_r2_key": "string"
+      },
+      "timeout_ms": 90000,
+      "retry_attempts": 1,
+      "steps": [
+        {
+          "step": 1,
+          "label": "Load report and HTML",
+          "detail": "Verify report exists in ctx.companyId and has html_snapshot_r2_key. Fetch snapshot HTML from R2."
+        },
+        {
+          "step": 2,
+          "label": "Sanitize HTML",
+          "detail": "Run DOMPurify with WHOLE_DOCUMENT true, forbid tags script/iframe/object/embed/form/input/textarea/select and event attrs onerror/onload/onclick/onmouseover, ALLOW_DATA_ATTR false. If removed content ratio > 5%, fail as malicious payload."
+        },
+        {
+          "step": 3,
+          "label": "Acquire browser from pool",
+          "detail": "Obtain or spawn Puppeteer instance from pool (max 3). Enforce per-render timeout 30s with Promise.race."
+        },
+        {
+          "step": 4,
+          "label": "Render PDF",
+          "detail": "page.setContent(cleanHtml) with networkidle0 wait, then page.pdf({ format:'A4', printBackground:true })."
+        },
+        {
+          "step": 5,
+          "label": "Persist PDF",
+          "detail": "Upload buffer to R2 output key {company_id}/reports/{report_id}/report.pdf."
+        },
+        {
+          "step": 6,
+          "label": "Update DB and notify",
+          "detail": "UPDATE report SET pdf_r2_key = output_r2_key WHERE report_id = ?. Publish Redis pub/sub message to render-pdf:{report_id} with { pdf_r2_key }."
+        },
+        {
+          "step": 7,
+          "label": "Release pool resources",
+          "detail": "Return browser to pool; increment render counter and recycle instance after 50 renders."
+        }
+      ],
+      "error_handling": [
+        "On per-render timeout, throw retriable failure for BullMQ retry.",
+        "After two failed attempts, job goes failed; report.pdf_r2_key remains null.",
+        "MCP render_pdf waits max 90s then returns { error:'render_timeout' } and agent falls back to html_snapshot_url."
+      ]
+    },
+    {
+      "queue": "pending-obs-timeout",
+      "job_name": "pending_observation_sweep",
+      "trigger": "Repeatable safety-net job every 300000 ms plus delayed per-record timeout scheduling.",
+      "payload_schema": {
+        "mode": "repeatable_sweep"
+      },
+      "timeout_ms": 30000,
+      "retry_attempts": 3,
+      "steps": [
+        {
+          "step": 1,
+          "label": "Query expired pending records",
+          "detail": "SELECT * FROM pending_manual_observation WHERE status = 'pending' AND expires_at < now() (drizzle/migrations/0007_async_audit_rls.sql::pending_manual_observation)."
+        },
+        {
+          "step": 2,
+          "label": "Transition to timed_out",
+          "detail": "For each row, UPDATE status = 'timed_out' as terminal state (maps to pending_obs_status enum lifecycle from Slice 1 + Slice 5 §5.8)."
+        },
+        {
+          "step": 3,
+          "label": "Unblock waiting agent",
+          "detail": "Publish Redis message { status:'timeout' } to pending-obs:{pending_id} so src/lib/agent/loop.ts resumes without polling (Slice 5 §5.8)."
+        },
+        {
+          "step": 4,
+          "label": "Operational logging",
+          "detail": "Log timed-out count for observability and worker diagnostics."
+        }
+      ],
+      "error_handling": [
+        "Sweep retries on transient DB/Redis failures.",
+        "Repeatable sweep exists even when primary delayed jobs are lost due to Redis restart or worker crash (MR-28)."
+      ]
+    },
+    {
+      "queue": "pending-obs-timeout",
+      "job_name": "pending_observation_delayed_timeout_per_record",
+      "trigger": "Scheduled when propose_manual_observation creates a pending record.",
+      "payload_schema": {
+        "pending_id": "uuid",
+        "fire_at": "created_at + 10min"
+      },
+      "timeout_ms": 30000,
+      "retry_attempts": 3,
+      "steps": [
+        {
+          "step": 1,
+          "label": "Load target row",
+          "detail": "Read pending_manual_observation by pending_id (drizzle/migrations/0007_async_audit_rls.sql) and confirm status is pending."
+        },
+        {
+          "step": 2,
+          "label": "Apply timed_out",
+          "detail": "If still pending and now >= expires_at, set status to timed_out."
+        },
+        {
+          "step": 3,
+          "label": "Publish unblock signal",
+          "detail": "Publish { status:'timeout' } to pending-obs:{pending_id}."
+        }
+      ],
+      "error_handling": [
+        "If row already confirmed/skipped/timed_out, no-op and complete."
+      ]
+    }
+  ],
+  "types_and_interfaces": [
+    {
+      "name": "AgentContext",
+      "file": "src/lib/mcp/index.ts",
+      "definition": "type AgentContext = { companyId: string; userId: string; sessionId: string; };"
+    },
+    {
+      "name": "ChatMessageContent",
+      "file": "src/types/chat.ts",
+      "definition": "type UserTextContent = { text: string };\ntype AgentTextContent = { text: string };\ntype AgentToolCallContent = { tool_name: string; summary: string; details?: Record<string, unknown> };\ntype ManualObsPrefilled = { label: string; normalized_key: string; value: string; unit: string | null; period_start: string | null; period_end: string | null; };\ntype ManualObsRequestContent = { pending_id: string; prefilled: ManualObsPrefilled };\ntype ReportReadyContent = { report_id: string; title: string; html_snapshot_url: string; pdf_url: string | null };\ntype ErrorContent = { message: string; retryable: boolean };\ntype ChatMessageContent = UserTextContent | AgentTextContent | AgentToolCallContent | ManualObsRequestContent | ReportReadyContent | ErrorContent;"
+    },
+    {
+      "name": "ChatSseEvent",
+      "file": "src/lib/agent/session-buffer.ts",
+      "definition": "type TokenEvent = { event_name: 'token'; payload: { delta: string } };\ntype ToolCallEvent = { event_name: 'tool_call'; payload: { tool_name: string; summary: string; details?: Record<string, unknown> } };\ntype ManualObsRequestEvent = { event_name: 'manual_obs_request'; payload: { pending_id: string; prefilled: { label: string; normalized_key: string; value: string; unit: string | null; period_start: string | null; period_end: string | null } } };\ntype ReportReadyEvent = { event_name: 'report_ready'; payload: { report_id: string; title: string; html_snapshot_url: string; pdf_url: string | null } };\ntype ErrorEvent = { event_name: 'error'; payload: { message: string; retryable: boolean } };\ntype DoneEvent = { event_name: 'done'; payload: Record<string, never> };\ntype ChatSseEvent = TokenEvent | ToolCallEvent | ManualObsRequestEvent | ReportReadyEvent | ErrorEvent | DoneEvent;"
+    },
+    {
+      "name": "ComputeDerivationInputOutput",
+      "file": "src/lib/mcp/compute-derivation.ts",
+      "definition": "type Period = { type: 'FY' | 'Q' | 'YTD' | 'custom'; start_date: string; end_date: string; label?: string };\ntype ComputeDerivationInput = { observation_ids: string[]; operation: 'sum' | 'average' | 'delta' | 'ratio' | 'count'; expected_periods?: Period[] };\ntype Coverage = { present_periods: Period[]; expected_periods: Period[]; fraction: number | null };\ntype ComputeDerivationOutput = { derivation_result_id: string; value: number; unit: string; coverage: Coverage; input_observation_ids: string[]; status: 'fresh' | 'reused'; stale: boolean };"
+    },
+    {
+      "name": "CreateReportInputOutput",
+      "file": "src/lib/mcp/create-report.ts",
+      "definition": "type CreateReportInput = { client_id?: string; language: string; html_content: string; observation_ids: string[]; derivation_result_ids: string[]; reporting_period_start?: string; reporting_period_end?: string };\ntype CreateReportOutput = { report_id: string; version: number; html_snapshot_url: string; style_snapshot: Record<string, unknown> | null; status: 'draft' };"
+    },
+    {
+      "name": "RenderPdfInputOutput",
+      "file": "src/lib/mcp/render-pdf.ts",
+      "definition": "type RenderPdfInput = { report_id: string };\ntype RenderPdfOutput = { report_id: string; pdf_url: string } | { error: 'render_timeout' };"
+    },
+    {
+      "name": "PendingManualObservationApi",
+      "file": "src/app/api/manual-observations/pending/[id]/route.ts",
+      "definition": "type PendingStatusDb = 'pending' | 'confirmed' | 'skipped' | 'timed_out';\ntype PendingStatusApi = 'pending' | 'confirmed' | 'skipped' | 'timeout';\ntype PendingObservationResponse = { pending_id: string; status: PendingStatusApi; observation_id: string | null; created_at: string; expires_at: string };"
+    },
+    {
+      "name": "ManualObservationConfirmRequest",
+      "file": "src/app/api/manual-observations/pending/[id]/confirm/route.ts",
+      "definition": "type ManualObservationConfirmRequest = { label: string; normalized_key: string; value: string; unit?: string | null; data_type: 'numeric' | 'percentage' | 'text' | 'boolean'; time_behavior: 'periodic' | 'point_in_time' | 'none'; period_start?: string | null; period_end?: string | null; category_id?: string | null; source_reference?: string | null; note?: string | null; };"
+    },
+    {
+      "name": "ReportsApiShapes",
+      "file": "src/app/api/reports/route.ts",
+      "definition": "type ReportListItem = { report_id: string; version: number; status: 'draft' | 'final'; language: string; generated_at: string; client_id: string | null; source_report_id: string | null };\ntype ReportDetail = ReportListItem & { html_snapshot_url: string; pdf_url: string | null };\ntype ReportVersionsResponse = { versions: Array<{ report_id: string; version: number; source_report_id: string | null; generated_at: string; status: 'draft' | 'final'; language: string }> };"
+    }
+  ],
+  "constants": [
+    {
+      "name": "PROJECT_STACK",
+      "file": "implementation_plan.md",
+      "value": "PostgreSQL 16 + pgvector + pg_trgm; Drizzle ORM; BullMQ + Redis; Cloudflare R2; Next.js 14 App Router; Auth.js credentials+JWT; PaddleOCR-VL 1.5; Grok grok-4-1-fast-reasoning; OpenAI text-embedding-3-small; mem0; TypeScript strict mode",
+      "purpose": "Cross-cutting architecture context that must be preserved in Slice 5 implementation."
+    },
+    {
+      "name": "THREE_PROCESS_DEPLOYMENT",
+      "file": "implementation_plan.md",
+      "value": "Next.js app:3000 | pipeline worker health:3002 | PDF worker health:3003",
+      "purpose": "Operational topology and health endpoints."
+    },
+    {
+      "name": "AUTH_JWT_SHAPE",
+      "file": "src/lib/auth.ts",
+      "value": "{ user_id: string, company_id: string, role: 'admin' | 'editor' | 'viewer' }",
+      "purpose": "Tenant and RBAC context source for all route and tool guards."
+    },
+    {
+      "name": "BULLMQ_QUEUE_TIMEOUTS",
+      "file": "src/lib/queues.ts",
+      "value": "ocr-job=180000; embedding-job=120000; extraction-job=300000; semantic-conflict-job=60000; render-pdf-job=90000; pending-obs-timeout=30000",
+      "purpose": "Timeout policy alignment across app and worker processes."
+    },
+    {
+      "name": "CHAT_SSE_STREAM_MAXLEN",
+      "file": "src/lib/agent/session-buffer.ts",
+      "value": "200",
+      "purpose": "Approximate maximum replay entries per session stream via XADD MAXLEN ~ 200."
+    },
+    {
+      "name": "CHAT_SSE_STREAM_TTL_SECONDS",
+      "file": "src/lib/agent/session-buffer.ts",
+      "value": "60",
+      "purpose": "Replay retention after done event for reconnect gap handling."
+    },
+    {
+      "name": "MANUAL_OBS_EXPIRY_MINUTES",
+      "file": "src/lib/mcp/propose-manual-observation.ts",
+      "value": "10",
+      "purpose": "Pending manual observation terminal timeout window."
+    },
+    {
+      "name": "REPORT_HTML_MAX_BYTES",
+      "file": "src/lib/mcp/create-report.ts",
+      "value": "2097152",
+      "purpose": "Maximum HTML snapshot size (2 MB) enforced before R2 upload."
+    },
+    {
+      "name": "PDF_RENDER_TIMEOUT_SECONDS",
+      "file": "src/lib/mcp/render-pdf.ts",
+      "value": "90",
+      "purpose": "Total wait budget for pub/sub + DB poll fallback before render_timeout response."
+    },
+    {
+      "name": "PDF_POOL_MAX_BROWSERS",
+      "file": "workers/pdf/pool.ts",
+      "value": "3",
+      "purpose": "Concurrency cap for Chromium instances."
+    },
+    {
+      "name": "PDF_POOL_RESTART_AFTER_RENDERS",
+      "file": "workers/pdf/pool.ts",
+      "value": "50",
+      "purpose": "Prevent long-lived Chromium memory leak accumulation."
+    },
+    {
+      "name": "PDF_PER_RENDER_TIMEOUT_MS",
+      "file": "workers/pdf/pool.ts",
+      "value": "30000",
+      "purpose": "Per-page render timeout bound inside worker."
+    }
+  ],
+  "sse_events": [
+    {
+      "event_name": "token",
+      "payload": {
+        "delta": "string"
+      },
+      "emitted_by": "src/lib/agent/streaming.ts",
+      "consumed_by": "src/components/chat/ChatShell.tsx"
+    },
+    {
+      "event_name": "tool_call",
+      "payload": {
+        "tool_name": "string",
+        "summary": "string",
+        "details": {}
+      },
+      "emitted_by": "src/lib/agent/loop.ts",
+      "consumed_by": "src/components/chat/ChatShell.tsx"
+    },
+    {
+      "event_name": "manual_obs_request",
+      "payload": {
+        "pending_id": "uuid",
+        "prefilled": {
+          "label": "string",
+          "normalized_key": "string",
+          "value": "string",
+          "unit": "string|null",
+          "period_start": "date|null",
+          "period_end": "date|null"
+        }
+      },
+      "emitted_by": "src/lib/mcp/propose-manual-observation.ts",
+      "consumed_by": "src/components/chat/ManualObsPopup.tsx"
+    },
+    {
+      "event_name": "report_ready",
+      "payload": {
+        "report_id": "uuid",
+        "title": "string",
+        "html_snapshot_url": "url",
+        "pdf_url": "url|null"
+      },
+      "emitted_by": "src/lib/agent/loop.ts",
+      "consumed_by": "src/components/chat/ReportReadyCard.tsx"
+    },
+    {
+      "event_name": "error",
+      "payload": {
+        "message": "string",
+        "retryable": true
+      },
+      "emitted_by": "src/lib/agent/loop.ts",
+      "consumed_by": "src/components/chat/ChatShell.tsx"
+    },
+    {
+      "event_name": "done",
+      "payload": {},
+      "emitted_by": "src/lib/agent/streaming.ts",
+      "consumed_by": "src/components/chat/ChatShell.tsx"
+    }
+  ],
+  "acceptance_criteria": [
+    "POST /api/chat/sessions/{id}/messages returns 202 immediately and agent output is asynchronous over SSE.",
+    "GET /api/chat/sessions/{id}/stream emits token events then done and supports Last-Event-ID replay without losing events across reconnect.",
+    "propose_manual_observation emits manual_obs_request; popup opens prefilled; confirm creates approved observation and resumes chat.",
+    "create_report uploads HTML snapshot to R2 and persists html_snapshot_r2_key; render_pdf enqueues render-pdf-job and eventually emits report_ready.",
+    "GET /api/reports excludes html_snapshot_url in list response.",
+    "GET /api/reports/{id} returns fresh presigned html_snapshot_url valid for one hour and pdf_url null-or-url depending on readiness.",
+    "ReportDetail renders HTML via sandboxed iframe and does not use dangerouslySetInnerHTML.",
+    "GET /api/reports/{id}/versions returns lineage chain with correct source_report_id references after regeneration.",
+    "GET /api/manual-observations/pending/{id} returns pending status payload fields exactly as specified.",
+    "POST /api/manual-observations/pending/{id}/confirm returns 409 for non-pending terminal records.",
+    "All MCP tools derive company scope from AgentContext.companyId and do not accept company_id in tool input.",
+    "PDF worker builds/runs independently and processes render-pdf-job even when Next.js app process is unavailable."
+  ],
+  "known_spec_deviations": [
+    {
+      "item": "Slice 5 states no new migrations but still relies on report/html key and pending lifecycle semantics",
+      "reason": "All required entities are present from Slice 1 migrations 0004/0006/0007; this slice performs behavioral logic only and requires no additional DDL."
+    },
+    {
+      "item": "pending_obs_status DB enum value is `timed_out` (SQL) but API/response layer exposes it as `timeout` per §5.8 contract. Both are intentional — DB layer and API layer use different tokens.",
+      "reason": "SQL enum pending_obs_status (§1.4) uses `timed_out`; §5.8 API response shape and lifecycle transitions specify `timeout` as the client-visible token. Background job DB-write steps write `timed_out` to match the SQL enum; api_endpoints response bodies, SSE payloads, and type definitions expose `timeout` to match the §5.8 contract."
+    },
+    {
+      "item": "agent-loop timeout_ms is 0 (unlimited) rather than a bounded value",
+      "reason": "The agent loop must wait sequentially for pending manual observation responses (up to 10 minutes each), report generation, and PDF rendering (90s). A fixed timeout would risk killing legitimate long sessions. BullMQ's individual job step timeouts and the pending-obs 10-minute TTL provide bounded sub-task constraints instead."
+    },
+    {
+      "item": "PDF worker listens on internal port 3003 while PDF_WORKER_URL uses port 3001",
+      "reason": "The PDF worker process binds to port 3003 inside its container (EXPOSE 3003 in Dockerfile, /health endpoint on 3003 in index.ts). Docker-compose maps host port 3001 to container port 3003 (ports: 3001:3003), so callers outside the container (e.g. the Next.js app) correctly use PDF_WORKER_URL=http://localhost:3001. There is no conflict — this is standard Docker port mapping."
+    }
+  ],
+  "implementation_order": [
+    "Wire chat session CRUD and message APIs with ownership guards and strict content validation.",
+    "Implement Redis Streams session buffer and SSE stream endpoint with Last-Event-ID replay semantics.",
+    "Implement MCP dispatcher and foundational tools get_preferences/search_observations/search_evidence/compute_derivation.",
+    "Implement propose_manual_observation plus pending GET/confirm/skip endpoints and pub/sub unblocking flow.",
+    "Implement create_report tool and report list/detail/versions endpoints with fresh presigned URL behavior.",
+    "Implement PDF worker (pool, render job, Dockerfile) and MCP render_pdf wait/poll fallback.",
+    "Implement report regeneration endpoint with optional mem0 write and session resolution strategy.",
+    "Implement chat UI shell/cards/popup and reports list/detail/version sidebar with polling + notification short-circuit.",
+    "Add unit/integration/E2E tests for replay buffer, tool dispatch, pending lifecycle, report URL contract, and regenerate lineage.",
+    "Run verification checklist: typecheck, tests, curl contract checks, docker build workers/pdf, and end-to-end chat→report flow under 90s fixture target."
+  ]
+}

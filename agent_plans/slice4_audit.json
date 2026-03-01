@@ -1,0 +1,328 @@
+{
+  "slice": 4,
+  "generated_at": "2026-02-22T00:00:00.000Z",
+  "verdict": "FAIL",
+  "verdict_reason": "4 critical issues found: missing notification_type enum values, duplicate notification insert with wrong type in conflict resolve, retry policy not wired to queue defaults, and LOW_CONFIDENCE_THRESHOLD set to 0.40 instead of 0.70. Additionally 5 high-severity issues including missing attestation action column, conflict case insert race condition, and malformed Grok response caching.",
+  "static_audit": {
+    "critical_count": 4,
+    "high_count": 5,
+    "medium_count": 12,
+    "low_count": 10,
+    "all_issues": [
+      {
+        "severity": "critical",
+        "category": "api_contracts",
+        "file": "src/lib/notifications/publish.ts",
+        "description": "notification_type DB enum missing 'conflict_resolved'. publishNotification silently maps 'conflict_resolved' → 'conflict_detected' via typeMap, making resolution and detection notifications indistinguishable in the DB. A migration to add 'conflict_resolved' to the notification_type enum is required.",
+        "plan_reference": "types_and_interfaces[6].definition (NotificationEvent notificationType union); files[5] publishNotification"
+      },
+      {
+        "severity": "critical",
+        "category": "api_contracts",
+        "file": "src/app/api/conflicts/[id]/resolve/route.ts",
+        "description": "Duplicate notification insertion: inserts a notification row with type 'conflict_detected' inside the withTenant transaction, THEN calls publishNotification() after commit which also inserts a notification row. Creates two notification rows per resolve action. The in-transaction insert also uses wrong type 'conflict_detected' instead of plan-required 'conflict_resolved'.",
+        "plan_reference": "api_endpoints[1].implementation_notes: 'insert notification type conflict_resolved … Publish notification after transaction commit'"
+      },
+      {
+        "severity": "critical",
+        "category": "background_jobs",
+        "file": "src/lib/queues.ts",
+        "description": "semanticConflictQueue does not set attempts or backoff in defaultJobOptions. SEMANTIC_CONFLICT_RETRY_POLICY constant is defined in the worker file but never wired into queue definition. Additionally, src/lib/observations/transitions.ts enqueues with attempts:2/delay:1000 instead of plan-required attempts:3/backoff:2s/4s/8s.",
+        "plan_reference": "background_jobs.error_handling[0]: 'BullMQ retries: 3 attempts with exponential backoff 2s, 4s, 8s'"
+      },
+      {
+        "severity": "critical",
+        "category": "sse_types_constants",
+        "file": "src/lib/constants.ts",
+        "description": "LOW_CONFIDENCE_THRESHOLD = 0.40 in code but plan specifies 0.70. All plan documents and existing tests (slice2-constants.test.ts, slice2-ocr-parse.test.ts) assert 0.70. Tests will fail against current value.",
+        "plan_reference": "constants[0].value = '0.70'"
+      },
+      {
+        "severity": "high",
+        "category": "api_contracts",
+        "file": "src/app/api/observations/manual/route.ts",
+        "description": "attestation_records schema has no 'action' column. Plan requires storing submitted|approved action per attestation, but no column exists and no migration was added. attestationAction variable is computed but never used (dead code).",
+        "plan_reference": "files[8].sections[0]: 'insert attestation_record action submitted|approved'"
+      },
+      {
+        "severity": "high",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Conflict case insert uses SELECT-then-INSERT pattern instead of atomic INSERT ... ON CONFLICT DO NOTHING. Under concurrent workers processing the same pair, both can SELECT 0 rows and INSERT, creating duplicate conflict cases. Plan requires ON CONFLICT/duplicate guard for atomicity.",
+        "plan_reference": "background_jobs.error_handling[4]: 'Conflict case insert races are handled via ON CONFLICT/duplicate guard'"
+      },
+      {
+        "severity": "high",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Malformed Grok classifier responses are unconditionally cached as DIFFERENT_KEY. Plan states 'do not write cache entry' for malformed output. A malformed response cached permanently prevents valid re-classification on future jobs.",
+        "plan_reference": "background_jobs.error_handling[3]: 'Malformed classifier output: log parse error, do not write cache entry, treat as DIFFERENT_KEY'"
+      },
+      {
+        "severity": "high",
+        "category": "sse_types_constants",
+        "file": "src/lib/notifications/publish.ts",
+        "description": "notification_type enum missing 'pipeline_done'. Plan specifies this type but DB has 'pipeline_completed'. publishNotification maps 'pipeline_done' → 'pipeline_completed' silently, creating inconsistency between SSE payload type and persisted DB type.",
+        "plan_reference": "types_and_interfaces[6].definition (NotificationEvent notificationType union)"
+      },
+      {
+        "severity": "high",
+        "category": "file_completeness",
+        "file": "src/lib/pipeline/events.ts",
+        "description": "ConflictDetectedEvent and NotificationEvent types defined in src/lib/pipeline/events.ts instead of plan-specified src/app/api/pipeline/events/route.ts. Types also include extra 'id: number' field not in plan definitions.",
+        "plan_reference": "types_and_interfaces[5].file and types_and_interfaces[6].file"
+      },
+      {
+        "severity": "medium",
+        "category": "file_completeness",
+        "file": "src/app/(app)/conflicts/page.tsx",
+        "description": "No server-side initial fetch to GET /api/conflicts. All data fetching done client-side in ConflictInboxPage via useEffect, causing loading flash on initial render.",
+        "plan_reference": "files[11].sections[0]: 'server-side initial fetch to GET /api/conflicts'"
+      },
+      {
+        "severity": "medium",
+        "category": "file_completeness",
+        "file": "src/components/observations/ManualObservationForm.tsx",
+        "description": "Zod schema (manualObservationSchema) defined but never connected to react-hook-form via zodResolver. useForm uses no resolver. Zod schema is effectively dead code.",
+        "plan_reference": "files[15].sections[0]: 'react-hook-form + Zod fields'"
+      },
+      {
+        "severity": "medium",
+        "category": "file_completeness",
+        "file": "src/components/observations/ManualObservationForm.tsx",
+        "description": "categoryId field defined in Zod schema but no UI input rendered for selecting a category.",
+        "plan_reference": "files[15].sections[0]: form fields include 'categoryId'"
+      },
+      {
+        "severity": "medium",
+        "category": "file_completeness",
+        "file": "src/lib/conflicts/detectSemantic.ts",
+        "description": "Raw SQL with 'FROM observation o' returns snake_case columns that don't match Drizzle-inferred camelCase types. Consumer in semanticConflict.ts uses fragile dual-access patterns like '(obsB as any).observation_id ?? (obsB as any).observationId'.",
+        "plan_reference": "files[3].sections[0]: 'Export findCandidatePairs(db, observationId, companyId)'"
+      },
+      {
+        "severity": "medium",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Key equivalence cache hash not company-scoped. buildCacheKey uses only keyA/keyB, not companyId. Different companies with same key pair could share cache entries, leaking cross-tenant classification results.",
+        "plan_reference": "background_jobs.steps[2]: 'Query key_equivalence_cache by (company_id, key_a, key_b)'"
+      },
+      {
+        "severity": "medium",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Worker duplicates notification insert + Redis pub/sub logic inline instead of calling publishNotification() from src/lib/notifications/publish.ts as plan requires. Bypasses utility's type-mapping and unread count logic.",
+        "plan_reference": "background_jobs.steps[6]: 'Call publishNotification(companyId, notification)'"
+      },
+      {
+        "severity": "medium",
+        "category": "sse_types_constants",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Worker imports publishPipelineEvent but never calls it — publishes directly via redis.publish(). Bypasses centralized event publishing logic.",
+        "plan_reference": "sse_events[0].emitted_by: 'via publishPipelineEvent'"
+      },
+      {
+        "severity": "medium",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "conflictGroupId always generated as new UUIDv7. Plan says it should reuse existing group when related conflicts share a normalized key.",
+        "plan_reference": "background_jobs.steps[4]: 'conflict_group_id (existing from candidate group or new UUIDv7)'"
+      },
+      {
+        "severity": "medium",
+        "category": "api_contracts",
+        "file": "src/app/api/conflicts/[id]/resolve/route.ts",
+        "description": "Returns undocumented 422 VALIDATION_ERROR code for invalid UUID format and reason length. Plan error_responses only lists 422 OBSERVATION_NOT_IN_CONFLICT.",
+        "plan_reference": "api_endpoints[1].error_responses: only 422 code is 'OBSERVATION_NOT_IN_CONFLICT'"
+      },
+      {
+        "severity": "medium",
+        "category": "database_migrations",
+        "file": "src/lib/db/schema/documents.ts",
+        "description": "Plan references document_version.uploaded_at but schema has created_at. Semantically equivalent but naming mismatch could cause runtime errors if implemented literally.",
+        "plan_reference": "files[1] (applyLatestWins.ts): 'provenance_type=document -> document_version.uploaded_at'"
+      },
+      {
+        "severity": "medium",
+        "category": "sse_types_constants",
+        "file": "src/lib/constants.ts",
+        "description": "Exported constant name is QUEUE_TIMEOUT_MS (singular) but plan specifies QUEUE_TIMEOUTS_MS (plural).",
+        "plan_reference": "constants[1].name = 'QUEUE_TIMEOUTS_MS'"
+      },
+      {
+        "severity": "medium",
+        "category": "api_contracts",
+        "file": "src/app/api/conflicts/route.ts",
+        "description": "No upper bound enforced on 'limit' query parameter. Client could pass limit=100000 and trigger unbounded database query.",
+        "plan_reference": "api_endpoints[0].validation_rules: 'page and limit must be positive integers'"
+      },
+      {
+        "severity": "low",
+        "category": "file_completeness",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "TODO comments present in semanticConflict.ts, publish.ts, notifications/[id]/read/route.ts, and observations/manual/route.ts.",
+        "plan_reference": "General code quality"
+      },
+      {
+        "severity": "low",
+        "category": "file_completeness",
+        "file": "src/components/conflicts/ConflictInboxPage.tsx",
+        "description": "Missing user_reviewed filter option. Only auto_resolved and user_overridden are mapped in the resolution status filter.",
+        "plan_reference": "files[12].sections[0]: 'resolutionStatus: Tous/Non résolus/Résolus'"
+      },
+      {
+        "severity": "low",
+        "category": "file_completeness",
+        "file": "src/components/notifications/NotificationBell.tsx",
+        "description": "EventSource connects to /api/pipeline/events without explicit credential handling. May not send cookies in all deployment configurations.",
+        "plan_reference": "files[17].sections[0]: 'Subscribe to existing pipeline SSE stream'"
+      },
+      {
+        "severity": "low",
+        "category": "api_contracts",
+        "file": "src/app/api/observations/manual/route.ts",
+        "description": "Dead code: attestationAction variable computed as 'approved'|'submitted' but never referenced in any insert or audit log.",
+        "plan_reference": "api_endpoints[2].implementation_notes: 'Insert attestation action submitted|approved'"
+      },
+      {
+        "severity": "low",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Numeric tolerance check: when both values are 0, guard on numA !== 0 skips check entirely, treating identical zero-valued observations as a conflict.",
+        "plan_reference": "background_jobs.steps[3]: 'equal within tolerance 0.1%'"
+      },
+      {
+        "severity": "low",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "No value comparison for non-numeric observations. Two observations with identical text values classified as SAME_KEY would produce a spurious conflict.",
+        "plan_reference": "background_jobs.steps[3]: 'normalize comparable numeric values'"
+      },
+      {
+        "severity": "low",
+        "category": "background_jobs",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Module-level singleton Redis connection via getRedis() is never closed on worker shutdown, leaking the connection.",
+        "plan_reference": "General infrastructure"
+      },
+      {
+        "severity": "low",
+        "category": "sse_types_constants",
+        "file": "N/A",
+        "description": "No .env.example file exists for developer onboarding. All 6 env vars are validated in src/lib/env.ts but undiscoverable without reading code.",
+        "plan_reference": "env_vars_required (6 vars)"
+      },
+      {
+        "severity": "low",
+        "category": "sse_types_constants",
+        "file": "workers/pipeline/jobs/semanticConflict.ts",
+        "description": "Uses process.env.REDIS_URL directly instead of centralized env validation from src/lib/env.ts. Missing REDIS_URL would produce opaque error.",
+        "plan_reference": "env_vars_required[1] (REDIS_URL)"
+      },
+      {
+        "severity": "low",
+        "category": "sse_types_constants",
+        "file": "src/lib/constants.ts",
+        "description": "QUEUE_TIMEOUT_MS includes undocumented 'agent-loop: 0' entry not in plan's 6-entry value specification.",
+        "plan_reference": "constants[1].value (6 named entries)"
+      }
+    ]
+  },
+  "acceptance_criteria_results": [
+    {
+      "criterion": "Approving two observations with same normalized_key and overlapping period creates ConflictCase with auto_resolved=true and later timestamp winner.",
+      "result": "PASS",
+      "evidence": "findCandidatePairs filters by period overlap. semanticConflict.ts detects exact key match. latestWins picks later timestamp. Conflict case inserted with autoResolved: true and winningObservationId = winner.id.",
+      "notes": null
+    },
+    {
+      "criterion": "POST /api/conflicts/{id}/resolve with valid chosenObservationId returns 200, creates ConflictResolution, supersedes loser, and marks affected DerivationResult rows stale.",
+      "result": "PASS",
+      "evidence": "resolve/route.ts inserts conflict_resolution, sets loser status to superseded, marks derivation_result rows stale, returns 200. All in withTenant transaction.",
+      "notes": "Derivation staleness applied to ALL observations in conflict, not just loser — broader than specified but satisfies requirement."
+    },
+    {
+      "criterion": "POST /api/conflicts/{id}/resolve with chosenObservationId not in conflict observation_ids returns 422.",
+      "result": "PASS",
+      "evidence": "resolve/route.ts checks conflict.observationIds.includes(chosenObservationId), returns 422 OBSERVATION_NOT_IN_CONFLICT if not found.",
+      "notes": null
+    },
+    {
+      "criterion": "Viewer role on POST /api/conflicts/{id}/resolve returns 403.",
+      "result": "PASS",
+      "evidence": "resolve/route.ts checks role === 'viewer' early and returns 403 FORBIDDEN_ROLE.",
+      "notes": null
+    },
+    {
+      "criterion": "POST /api/observations/manual valid candidate payload returns 201 and persists Observation + AttestationRecord.",
+      "result": "PASS",
+      "evidence": "manual/route.ts inserts attestationRecords and observations within withTenant transaction, returns 201 with { id, status, attestationRecordId }.",
+      "notes": null
+    },
+    {
+      "criterion": "POST /api/observations/manual with status=approved enqueues semantic-conflict-job.",
+      "result": "PASS",
+      "evidence": "After transaction commit, checks result.status === 'approved' and calls semanticConflictQueue.add() with observationId and companyId.",
+      "notes": null
+    },
+    {
+      "criterion": "notification SSE event is delivered within 2 seconds of Notification insert.",
+      "result": "CANNOT_VERIFY_STATICALLY",
+      "evidence": "publish.ts performs DB insert immediately followed by Redis PUBLISH with no artificial delay. Code path is synchronous but 2-second SLA is a runtime property.",
+      "notes": "Requires integration/e2e test to formally verify the SLA."
+    },
+    {
+      "criterion": "Notification bell badge increments on notification SSE without page reload.",
+      "result": "PASS",
+      "evidence": "NotificationBell.tsx subscribes to EventSource at /api/pipeline/events. On 'notification' event, updates unreadCount and prepends notification to state. Badge renders reactively.",
+      "notes": null
+    },
+    {
+      "criterion": "PATCH /api/notifications/{id}/read returns 200 { read: true } and later unread query excludes it.",
+      "result": "PASS",
+      "evidence": "read/route.ts sets read: true and returns { id, read: true }. GET /api/notifications with unread=true filters by eq(notifications.read, false), excluding read notifications.",
+      "notes": null
+    },
+    {
+      "criterion": "KeyEquivalenceCache prevents second Grok call for same key pair (verified by mock call counter).",
+      "result": "PASS",
+      "evidence": "semanticConflict.ts queries keyEquivalenceCache by (companyId, keyPairHash). On cache hit, sets matchResult from cache and skips callGrokEquivalence. buildCacheKey sorts keys alphabetically for order-independent deduplication.",
+      "notes": "Mock call counter verification requires runtime test."
+    },
+    {
+      "criterion": "TypeScript and test gates pass: tsc --noEmit and vitest run (plus relevant Playwright conflict/notification/manual flows).",
+      "result": "CANNOT_VERIFY_STATICALLY",
+      "evidence": "IDE reports some possible module resolution warnings but referenced modules exist on disk with correct exports. Actual tsc --noEmit and vitest results require execution.",
+      "notes": "LOW_CONFIDENCE_THRESHOLD mismatch (0.40 vs 0.70) will likely fail existing tests."
+    }
+  ],
+  "criteria_pass_count": 9,
+  "criteria_fail_count": 0,
+  "criteria_unverifiable_count": 2,
+  "cleared_to_proceed": false,
+  "blocking_issues": [
+    "C1: notification_type DB enum missing 'conflict_resolved' — conflict resolution notifications stored with wrong type, indistinguishable from detections",
+    "C2: Duplicate notification insert in POST /api/conflicts/{id}/resolve — in-transaction insert with wrong type + publishNotification after commit creates two rows",
+    "C3: Retry policy not wired — queue defaults missing attempts/backoff, transitions.ts enqueues with attempts:2/delay:1000 instead of attempts:3/backoff:2s/4s/8s",
+    "C4: LOW_CONFIDENCE_THRESHOLD = 0.40 instead of plan-required 0.70 — existing tests will fail",
+    "H1: attestation_records schema missing 'action' column — attestation action tracking entirely absent from data model",
+    "H2: Conflict case insert race condition — SELECT-then-INSERT instead of atomic ON CONFLICT DO NOTHING",
+    "H3: Malformed Grok responses incorrectly cached as DIFFERENT_KEY — permanently prevents valid re-classification",
+    "H4: notification_type enum missing 'pipeline_done' — remapped silently to 'pipeline_completed'",
+    "H5: ConflictDetectedEvent and NotificationEvent types in wrong file with extra 'id' field"
+  ],
+  "recommended_fixes": [
+    "Add migration to extend notification_type enum with 'conflict_resolved' and optionally 'pipeline_done'",
+    "Remove in-transaction notification insert from resolve/route.ts; rely solely on publishNotification after commit",
+    "Wire SEMANTIC_CONFLICT_RETRY_POLICY into semanticConflictQueue defaultJobOptions; fix transitions.ts to use attempts:3/backoff:2000",
+    "Restore LOW_CONFIDENCE_THRESHOLD to 0.70",
+    "Add 'action' column to attestation_records via migration, or document this as a known deviation",
+    "Replace SELECT-then-INSERT for conflict cases with atomic INSERT ... ON CONFLICT DO NOTHING",
+    "Skip cache write when Grok response is malformed (check for PARSE_ERROR prefix in rationale)",
+    "Use publishNotification and publishPipelineEvent utilities in semanticConflict.ts instead of inline duplication",
+    "Include companyId in buildCacheKey hash to prevent cross-tenant cache sharing",
+    "Connect Zod schema to react-hook-form via zodResolver in ManualObservationForm",
+    "Add server-side initial fetch in conflicts/page.tsx for SSR",
+    "Cap limit parameter in GET /api/conflicts (e.g., max 100)"
+  ]
+}

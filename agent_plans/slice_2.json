@@ -1,0 +1,958 @@
+{
+  "slice": 2,
+  "title": "Upload → OCR → Evidence Blocks → Pipeline SSE + Retry Endpoint + Stale Detection Cron + Document Versions",
+  "description": "Implements the full Slice 2 ingestion and pipeline status loop: document upload, version management, category tagging, evidence blocks, and SSE pipeline events. Uses PostgreSQL 16 + pgvector + pg_trgm with Drizzle ORM, BullMQ + Redis queues, Cloudflare R2 object storage, Next.js App Router, Auth.js JWT sessions, PaddleOCR-VL 1.5, OpenAI text-embedding-3-small, and strict TypeScript. Auth claims are { user_id, company_id, role }. Queue contracts remain global for the project: ocr-job(180000), embedding-job(120000), extraction-job(300000), semantic-conflict-job(60000), render-pdf-job(90000), pending-obs-timeout(30000).",
+  "depends_on_slices": [1],
+  "env_vars_required": [
+    { "key": "DATABASE_URL", "description": "PostgreSQL DSN for app and worker DB access", "example": "postgresql://user:pass@localhost:5432/reportflow" },
+    { "key": "REDIS_URL", "description": "Redis DSN used by BullMQ and SSE pub/sub", "example": "redis://localhost:6379" },
+    { "key": "R2_ACCOUNT_ID", "description": "Cloudflare R2 account identifier", "example": "2f7c6d4c8a1b4f31b7d9e123456789ab" },
+    { "key": "R2_ACCESS_KEY_ID", "description": "R2 S3-compatible access key", "example": "R2AKIAEXAMPLE" },
+    { "key": "R2_SECRET_ACCESS_KEY", "description": "R2 S3-compatible secret key", "example": "r2_secret_example" },
+    { "key": "R2_BUCKET_NAME", "description": "Bucket storing originals and page PNGs", "example": "reportflow-documents" },
+    { "key": "PADDLEOCR_TOKEN", "description": "Bearer token for PaddleOCR-VL 1.5", "example": "paddle_token_example" },
+    { "key": "PADDLEOCR_API_URL", "description": "PaddleOCR-VL endpoint", "example": "https://aip.baidubce.com/rpc/2.0/ocr/v1/paddleocr" },
+    { "key": "OPENAI_API_KEY", "description": "API key for text-embedding-3-small", "example": "sk-example" },
+    { "key": "NEXTAUTH_URL", "description": "Auth.js canonical URL for cookie/session handling", "example": "http://localhost:3000" },
+    { "key": "NEXTAUTH_SECRET", "description": "Auth.js JWT signing secret", "example": "base64_32_byte_secret" },
+    { "key": "AUTH_TRUST_HOST", "description": "Proxy trust toggle", "example": "true" },
+    { "key": "NEXT_PUBLIC_APP_URL", "description": "Public frontend app URL for client-side navigation and callbacks", "example": "http://localhost:3000" }
+  ],
+  "packages_to_install": [
+    { "name": "pdf2pic", "version": "latest", "dev": false },
+    { "name": "tiktoken", "version": "latest", "dev": false },
+    { "name": "image-size", "version": "latest", "dev": false },
+    { "name": "@aws-sdk/s3-request-presigner", "version": "latest", "dev": false },
+    { "name": "pdfjs-dist", "version": "latest", "dev": false },
+    { "name": "framer-motion", "version": "latest", "dev": false },
+    { "name": "sonner", "version": "latest", "dev": false }
+  ],
+  "files": [
+    {
+      "action": "create",
+      "path": "src/app/(app)/documents/page.tsx",
+      "purpose": "Documents list page with SSR data fetch and SSE-driven status updates",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Server component fetches GET /api/documents?page=1&limit=20, renders DocumentsTable and UploadButton, mounts PipelineSSEProvider-aware client child for optimistic status updates. Empty state text is exactly 'Importez votre premier document'. Role guard blocks viewers from upload action. Uses session claims from src/lib/auth.ts auth() and never reads company_id from query params."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/documents/[id]/page.tsx",
+      "purpose": "Read-only document detail metadata with latest version state",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Fetches GET /api/documents/{id}, displays original filename, category, latest version pipeline status, page count, file size, created timestamp. Includes links to /api/documents/{id}/versions and /api/documents/{id}/blocks consumers. Strictly read-only in Slice 2."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/uploads/init/route.ts",
+      "purpose": "Generate presigned PUT URL after upload metadata validation",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "POST handler authenticates with src/lib/auth.ts auth(); rejects unauthenticated 401. Validates body via src/lib/uploads/validate.ts: filename(1..255), fileSize<=52428800, mimeType in allowlist, pageCount 1..200, categoryId UUID|null and same-tenant category. Uses src/lib/uploads/presign.ts generateUploadUrl(companyId, extension) built on src/lib/r2.ts r2Client and bucket env, returns { uploadUrl, objectKey, expiresIn:900 }. Error codes: file_too_large, unsupported_mime_type, page_count_exceeded, invalid_category."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/uploads/complete/route.ts",
+      "purpose": "Finalize upload, create document/version records, enqueue OCR",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "POST handler authenticates and validates objectKey pattern with company prefix guard. Performs R2 HEAD existence check. Idempotency check on document_version.object_key returns 200 existing payload and does not enqueue duplicate job. On first completion: insert document, insert document_version(status uploaded), insert pipeline_run(running), enqueue ocr-job with BullMQ queue from src/lib/queues.ts, publish pipeline_stage_changed via src/lib/pipeline/pubsub.ts. Uses withTenant from src/lib/db/rls.ts and schema symbols from src/lib/db/schema/documents.ts and src/lib/db/schema/pipeline.ts."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/route.ts",
+      "purpose": "Paginated documents list with filters and latest version status",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "GET handler supports page, limit, status, categoryId, q. Queries documents plus latest document_version per document ordered created_at DESC. Returns {data,total,page,pageSize}. pipelineStatus reflects latest version only. Uses withTenant and trgm search on document title where q is present."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/route.ts",
+      "purpose": "Single document metadata and latest version envelope",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "GET handler fetches document by id under tenant scope, joins latest version by created_at desc. Returns 404 when no row due to not found or RLS zero-row."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/versions/route.ts",
+      "purpose": "List all document versions",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "GET returns all versions for document sorted latest first including failed versions and pipeline_error fields. Returns 404 for missing/inaccessible document."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/status/route.ts",
+      "purpose": "Lightweight pipeline status polling endpoint",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "GET returns latest version pipelineStatus and pipelineError only. Used as fallback when SSE unavailable."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/blocks/route.ts",
+      "purpose": "Paginated evidence block listing",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "GET supports page, limit, lowConfidence filter, excludes chunk_type='superseded' unless includeSuperseeded=true. Returns hasEmbedding boolean and never returns embedding vector bytes. Maps bbox float[4] to object {x1,y1,x2,y2}."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/pages/[pageNumber]/route.ts",
+      "purpose": "Presigned GET URL for page PNG",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "GET validates pageNumber range against latest document_version.page_count, requires pipeline_status >= ocr_done else 404 code page_not_ready with current status. Returns presigned URL valid 3600 seconds for key {company_id}/{document_version_id}/pages/{n}.png."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/retry/route.ts",
+      "purpose": "Retry failed or stale pipeline",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "POST with no body, auth required, forbids viewer role with 403. Loads latest version and allows retry when status=failed or status in processing states with pipeline_status_updated_at older than 10 minutes. Resets to uploaded, clears error, enqueues ocr-job, inserts pipeline_run running, publishes pipeline_stage_changed. Returns 409 for non-retriable active states."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/category/route.ts",
+      "purpose": "Assign/unassign category",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "PATCH requires editor/admin. Validates category belongs to tenant when non-null; updates document.category_id; inserts audit_log record. Returns updatedAt timestamp. Errors: 403 viewer, 404 not found, 422 invalid_category."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/pipeline/events/route.ts",
+      "purpose": "SSE endpoint for pipeline events with heartbeat and replay",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "GET opens text/event-stream for authenticated user. Company scope comes only from auth session claims; query company_id ignored. Subscribes redisSub to pipeline:events:{company_id}. Emits heartbeat event every 30s. Supports Last-Event-ID replay using in-memory per-company ring buffer (max 200, ttl 60s) containing monotonic id and payload. On disconnect unsubscribe and cleanup."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/documents/DocumentsTable.tsx",
+      "purpose": "Documents table UI",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Renders paginated rows with filename, category, client, createdAt, and DocumentStatusBadge. Accepts optimistic status updates from usePipelineStream hook keyed by documentVersionId/documentId mapping."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/documents/DocumentStatusBadge.tsx",
+      "purpose": "Visual pipeline status mapping",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Maps statuses: uploaded/pending→En attente, ocr_processing→OCR en cours…, ocr_done→OCR terminé, embedding→Analyse…, embedded→Analysé, failed→Échec. Uses Framer Motion pulse only on active processing states."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/documents/UploadButton.tsx",
+      "purpose": "Client upload trigger and orchestration",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Validates local file constraints before network: size <= 50MB, mime allowlist, pdf page count <= 200 via pdfjs-dist. Calls /api/uploads/init, executes XHR PUT to R2 with progress events, then calls /api/uploads/complete. Handles success optimistic insertion."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/documents/UploadProgressOverlay.tsx",
+      "purpose": "Upload progress and expiry retry UX",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Shows percent progress during R2 PUT. On 403 presigned-url expiry, auto-retries exactly once by requesting /api/uploads/init and restarting PUT from 0%. Displays French retry message during automatic retry and terminal French error with manual retry button after second 403. Non-403 errors stop immediately without automatic retry."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/pipeline/PipelineSSEProvider.tsx",
+      "purpose": "Singleton EventSource manager",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Maintains one EventSource per session to /api/pipeline/events. Reconnect uses exponential backoff 1s..30s, sends Last-Event-ID header when reconnecting, exposes subscribe/unsubscribe callbacks via React context."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/pipeline/usePipelineStream.ts",
+      "purpose": "Hook to consume pipeline events",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Provides typed handlers for pipeline_stage_changed, pipeline_failed, extraction_complete; supports filtering by documentId/documentVersionId and emits state updates for status badges."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/uploads/presign.ts",
+      "purpose": "Presigned URL generation utility",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Exports generateUploadUrl(companyId, ext) that builds object key {companyId}/{uuidv7}/original.{ext} and signs PUT for 900s using @aws-sdk/s3-request-presigner against src/lib/r2.ts r2Client and R2_BUCKET. Enforces intended Content-Type and expected length constraints from validated metadata."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/uploads/validate.ts",
+      "purpose": "Centralized upload validation schemas",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Defines zod schemas for init and complete payloads and maps failures to stable error codes: file_too_large, unsupported_mime_type, page_count_exceeded, object_not_found, invalid_category. objectKey regex enforces {company}/{uuid}/original.(pdf|png|jpg|jpeg|webp)."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/pipeline/events.ts",
+      "purpose": "Pipeline event type union",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Defines TypeScript discriminated union for SSE events: pipeline_stage_changed, pipeline_failed, extraction_complete, heartbeat. Each event includes timestamp ISO string and monotonic event id for Last-Event-ID replay."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/pipeline/pubsub.ts",
+      "purpose": "Redis publisher for pipeline events",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Exports publishPipelineEvent(companyId,event) publishing JSON payload to channel pipeline:events:{companyId} using symbol redis from src/lib/redis.ts."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/ocr/pdf2pic.ts",
+      "purpose": "PDF/image to page PNG buffers",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Converts PDF buffers to per-page PNG at density 150 DPI using pdf2pic and system dependencies ghostscript + graphicsmagick. Returns ordered page buffers and dimensions for normalization. Image uploads are treated as single-page input."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/ocr/paddleocr.ts",
+      "purpose": "PaddleOCR-VL API client",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Sends per-page base64 PNG requests to PADDLEOCR_API_URL with PADDLEOCR_TOKEN auth, parses HTTP/network failures into explicit OCR-stage errors for DLQ handling."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/ocr/parse.ts",
+      "purpose": "OCR response to parsed blocks",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Maps OCR boxes/text/scores arrays into ParsedBlock records, normalizes pixel bbox to [0,1] ratios, clamps bounds, assigns block_type by heuristic (table_cell vs paragraph), and computes low_confidence flag using LOW_CONFIDENCE_THRESHOLD from src/lib/constants.ts."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/chunking/tokenize.ts",
+      "purpose": "Token counting using cl100k_base",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Uses tiktoken cl100k_base to compute token counts for merge/split decisions with deterministic behavior across worker runs."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/chunking/merge.ts",
+      "purpose": "Adjacent block merge algorithm",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Merges adjacent same-type paragraph blocks on same page when vertical gap threshold and <=512 combined tokens are satisfied. Produces merged chunk entries and marks originals as superseded with merged_block_ids lineage."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/chunking/split.ts",
+      "purpose": "Oversized block splitting",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Splits any block exceeding 512 tokens at nearest sentence boundary near cutoff and outputs child chunks with parent_block_id reference and chunk_type split."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/embeddings/openai.ts",
+      "purpose": "OpenAI embedding batch client",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Embeds text arrays with model text-embedding-3-small in batches of 512 max. Returns 1536-d vectors and per-batch error envelopes so failed batches can be marked embedding_status=failed without aborting the whole job."
+        }
+      ]
+    },
+    {
+      "action": "modify",
+      "path": "src/app/(app)/layout.tsx",
+      "purpose": "Mount pipeline SSE provider once per app session",
+      "sections": [
+        {
+          "label": "Patch",
+          "content": "Wrap existing authenticated layout content with PipelineSSEProvider so all pages can subscribe to pipeline events without creating duplicate EventSource connections."
+        }
+      ]
+    },
+    {
+      "action": "modify",
+      "path": "workers/pipeline/index.ts",
+      "purpose": "Register OCR/embedding consumers and health endpoint",
+      "sections": [
+        {
+          "label": "Patch",
+          "content": "Initialize worker process, register ocr-job and embedding-job consumers, attach failed handlers to dlq.ts, start health server on port 3002 via workers/pipeline/health.ts, and schedule stale pipeline sweep every 5 minutes."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/db.ts",
+      "purpose": "Dedicated Drizzle/Postgres pool for pipeline worker process",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Exports workerDb and pool configured separately from app server with min 1 and max 5 connections for long-running queue consumers. Uses DATABASE_URL and shares schema modules from src/lib/db/schema/* while keeping worker lifecycle ownership in workers/pipeline/index.ts."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/health.ts",
+      "purpose": "Worker health endpoint",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Starts HTTP server exposing GET /health returning {status:'ok', active_jobs, uptime_s}."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/jobs/ocr.ts",
+      "purpose": "OCR pipeline job",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Implements status gate idempotency, status transitions uploaded→ocr_processing→ocr_done, R2 file fetch, pdf2pic conversion, per-page PaddleOCR, bbox normalization, chunking merge/split pipeline, bulk insert evidence blocks, page PNG upload to R2, event publishing, and enqueue embedding-job. Allows re-entry from ocr_processing and failed for crash recovery/retry endpoint."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/jobs/embedding.ts",
+      "purpose": "Embedding pipeline job",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Implements status gate idempotency, status transitions ocr_done→embedding→embedded, selects embeddable blocks (not low_confidence and not superseded with embedding null), embeds in batches of 512, updates vectors and embedding_status, tolerates partial batch failure, publishes events, and enqueues extraction-job for Slice 3."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/dlq.ts",
+      "purpose": "Terminal failure handler for pipeline jobs",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "On exhausted retries updates document_version.pipeline_status='failed', sets pipeline_error_message, marks pipeline_run failed, inserts notification(type pipeline_failed), and publishes pipeline_failed SSE event with stage and error text."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/cron/stale-pipeline.ts",
+      "purpose": "Stalled pipeline detection",
+      "sections": [
+        {
+          "label": "Implementation",
+          "content": "Every 5 minutes finds document_versions stuck in ocr_processing, embedding, extracting for >10 minutes by pipeline_status_updated_at, marks failed with message 'Pipeline stalled — timed out', inserts notification, and emits pipeline_failed event."
+        }
+      ]
+    }
+  ],
+  "database_migrations": [],
+  "api_endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/uploads/init",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor"],
+      "request_body": {
+        "filename": "string",
+        "fileSize": "number",
+        "mimeType": "application/pdf|image/png|image/jpeg|image/webp|image/tiff",
+        "pageCount": "number",
+        "categoryId": "string|null"
+      },
+      "path_params": null,
+      "query_params": null,
+      "validation_rules": [
+        "filename length 1..255",
+        "fileSize integer > 0 and <= 52428800",
+        "mimeType must be allowlisted",
+        "pageCount integer in [1,200]",
+        "categoryId when provided must exist in same company"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": { "uploadUrl": "string", "objectKey": "string", "expiresIn": 900 }
+      },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No valid Auth.js session" },
+        { "status": 422, "code": "file_too_large", "condition": "fileSize > 50MB" },
+        { "status": 422, "code": "unsupported_mime_type", "condition": "mimeType not in allowlist" },
+        { "status": 422, "code": "page_count_exceeded", "condition": "pageCount > 200" },
+        { "status": 422, "code": "invalid_category", "condition": "category not in tenant" }
+      ],
+      "implementation_notes": [
+        "Authenticate with auth() from src/lib/auth.ts and derive company_id from JWT {user_id,company_id,role}",
+        "Use generateUploadUrl from src/lib/uploads/presign.ts with r2Client and R2_BUCKET from src/lib/r2.ts",
+        "Validation schemas in src/lib/uploads/validate.ts",
+        "Queue contracts and timeout constants remain defined in src/lib/queues.ts and src/lib/constants.ts"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/uploads/complete",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor"],
+      "request_body": {
+        "objectKey": "string",
+        "filename": "string",
+        "pageCount": "number",
+        "categoryId": "string|null",
+        "clientId": "string|null"
+      },
+      "path_params": null,
+      "query_params": null,
+      "validation_rules": [
+        "objectKey must match tenant prefix and naming pattern",
+        "pageCount in [1,200]",
+        "R2 HEAD must confirm object exists",
+        "Idempotency: existing objectKey returns existing ids with 200"
+      ],
+      "success_response": {
+        "status": 201,
+        "body": { "documentId": "string", "documentVersionId": "string", "pipelineStatus": "uploaded" }
+      },
+      "idempotent_response": { "status": 200, "code": "idempotent_replay", "condition": "objectKey already registered", "body": { "documentId": "string", "documentVersionId": "string", "pipelineStatus": "string" } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 422, "code": "object_not_found", "condition": "R2 HEAD failed" },
+        { "status": 422, "code": "invalid_object_key", "condition": "pattern/prefix guard fails" }
+      ],
+      "implementation_notes": [
+        "Use withTenant() from src/lib/db/rls.ts for all inserts/reads",
+        "Insert into symbols in src/lib/db/schema/documents.ts: document, documentVersion",
+        "Insert pipeline run using symbol from src/lib/db/schema/pipeline.ts",
+        "Enqueue on queue symbol ocrQueue in src/lib/queues.ts with timeout 180000",
+        "Publish SSE event using publishPipelineEvent in src/lib/pipeline/pubsub.ts"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/documents",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": null,
+      "query_params": {
+        "page": "number",
+        "limit": "number",
+        "status": "pipeline status optional",
+        "categoryId": "uuid optional",
+        "q": "string optional"
+      },
+      "validation_rules": [
+        "page >= 1",
+        "limit in [1,100]",
+        "status when present must be known pipeline_status enum",
+        "categoryId must be UUID"
+      ],
+      "success_response": {
+        "status": 200,
+        "body": { "data": [{"documentId": "uuid", "title": "string", "detectedType": "string", "categoryId": "uuid|null", "clientId": "uuid|null", "createdAt": "iso8601", "createdBy": "uuid|null", "latestVersion": {"documentVersionId": "uuid", "pipelineStatus": "string", "pageCount": 1, "fileSizeBytes": 1024, "createdAt": "iso8601"}}], "total": 0, "page": 1, "pageSize": 20 }
+      },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 422, "code": "invalid_query", "condition": "Query validation fails" }
+      ],
+      "implementation_notes": [
+        "Read documents and latest versions from src/lib/db/schema/documents.ts",
+        "Use RLS wrapper withTenant from src/lib/db/rls.ts",
+        "Sort by created_at DESC and return latest version pipeline status"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/documents/{id}",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": { "id": "uuid" },
+      "query_params": null,
+      "validation_rules": ["id must be UUID"],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "id": "string",
+          "originalFilename": "string",
+          "categoryId": "string|null",
+          "clientId": "string|null",
+          "latestVersion": {
+            "id": "string",
+            "version": 1,
+            "pipelineStatus": "embedded",
+            "pageCount": 1,
+            "sizeBytes": 1,
+            "createdAt": "string"
+          }
+        }
+      },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 404, "code": "document_not_found", "condition": "No tenant-visible row" }
+      ],
+      "implementation_notes": ["RLS-enforced lookup via withTenant from src/lib/db/rls.ts"]
+    },
+    {
+      "method": "GET",
+      "path": "/api/documents/{id}/versions",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": { "id": "uuid" },
+      "query_params": null,
+      "validation_rules": ["id UUID required"],
+      "success_response": { "status": 200, "body": { "data": [{"documentVersionId": "uuid", "documentId": "uuid", "version": 1, "pipelineStatus": "uploaded|ocr_processing|ocr_done|embedding|embedded|extracting|review_ready|failed", "pageCount": 1, "fileSizeBytes": 1024, "objectKey": "string", "originalFilename": "string", "pipelineErrorMessage": "string|null", "ocrQualityWarning": false, "detectedType": "sustainability_report|energy_bill|hr_report|financial_statement|other", "createdAt": "iso8601", "createdBy": "uuid|null"}], "total": 0, "page": 1, "pageSize": 20 } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 404, "code": "document_not_found", "condition": "No tenant-visible document" }
+      ],
+      "implementation_notes": ["Include failed versions and sort latest first"]
+    },
+    {
+      "method": "GET",
+      "path": "/api/documents/{id}/status",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": { "id": "uuid" },
+      "query_params": null,
+      "validation_rules": ["id UUID required"],
+      "success_response": { "status": 200, "body": { "pipelineStatus": "ocr_processing", "pipelineError": null } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 404, "code": "document_not_found", "condition": "No tenant-visible document" }
+      ],
+      "implementation_notes": ["Use latest document version only"]
+    },
+    {
+      "method": "GET",
+      "path": "/api/documents/{id}/blocks",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": { "id": "uuid" },
+      "query_params": { "page": "number", "limit": "number", "lowConfidence": "boolean optional", "includeSuperseeded": "boolean optional" },
+      "validation_rules": [
+        "page >= 1",
+        "limit in [1,200]",
+        "exclude superseded chunks by default",
+        "includeSuperseeded=true returns chunk_type='superseded' rows"
+      ],
+      "success_response": { "status": 200, "body": { "data": [{"blockId": "uuid", "pageNumber": 1, "textContent": "string", "ocrConfidence": 0.95, "lowConfidence": false, "bbox": {"x1": 0, "y1": 0, "x2": 100, "y2": 100}, "blockType": "paragraph|table_cell|header|list_item|figure_caption|other", "chunkType": "original|merged|split|superseded", "hasEmbedding": true, "embeddingStatus": "pending|completed|failed|skipped"}], "total": 0, "page": 1, "pageSize": 100 } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 404, "code": "document_not_found", "condition": "No tenant-visible document" }
+      ],
+      "implementation_notes": ["Never serialize embedding vectors in API body"]
+    },
+    {
+      "method": "GET",
+      "path": "/api/documents/{id}/pages/{pageNumber}",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": { "id": "uuid", "pageNumber": "number" },
+      "query_params": null,
+      "validation_rules": [
+        "pageNumber integer >= 1",
+        "pageNumber <= latest version page_count",
+        "pipeline_status must be ocr_done or beyond"
+      ],
+      "success_response": { "status": 200, "body": { "pageImageUrl": "string", "expiresIn": 3600 } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 404, "code": "page_not_ready", "condition": "OCR not completed" },
+        { "status": 404, "code": "page_out_of_range", "condition": "pageNumber exceeds page_count" }
+      ],
+      "implementation_notes": ["Generate presigned GET using src/lib/r2.ts client and tenant key prefix"]
+    },
+    {
+      "method": "POST",
+      "path": "/api/documents/{id}/retry",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor"],
+      "request_body": null,
+      "path_params": { "id": "uuid" },
+      "query_params": null,
+      "validation_rules": [
+        "Viewer role forbidden",
+        "Retriable when status=failed OR stalled processing > 10 minutes"
+      ],
+      "success_response": { "status": 200, "body": { "documentVersionId": "string", "pipelineStatus": "uploaded" } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 403, "code": "forbidden", "condition": "viewer role" },
+        { "status": 404, "code": "document_not_found", "condition": "No tenant-visible document" },
+        { "status": 409, "code": "non_retriable_state", "condition": "Active non-stale processing" }
+      ],
+      "implementation_notes": ["Enqueue ocr-job on src/lib/queues.ts ocrQueue and publish stage change"]
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/documents/{id}/category",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor"],
+      "request_body": { "categoryId": "string|null" },
+      "path_params": { "id": "uuid" },
+      "query_params": null,
+      "validation_rules": [
+        "Viewer role forbidden",
+        "categoryId null allowed to unset",
+        "categoryId non-null must exist in tenant"
+      ],
+      "success_response": { "status": 200, "body": { "documentId": "string", "categoryId": "string|null", "updatedAt": "string" } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 403, "code": "forbidden", "condition": "viewer role" },
+        { "status": 404, "code": "document_not_found", "condition": "No tenant-visible document" },
+        { "status": 422, "code": "invalid_category", "condition": "Category absent or cross-tenant" }
+      ],
+      "implementation_notes": ["Insert audit_log record using src/lib/db/schema/notifications.ts auditLog table, with entity_type='document', action='category_changed'"]
+    },
+    {
+      "method": "GET",
+      "path": "/api/pipeline/events",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": null,
+      "query_params": null,
+      "validation_rules": [
+        "Session required",
+        "company scope strictly from JWT session, not query params"
+      ],
+      "success_response": { "status": 200, "body": { "stream": "text/event-stream" } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session" },
+        { "status": 403, "code": "forbidden", "condition": "Session-company mismatch safety check" }
+      ],
+      "implementation_notes": [
+        "Subscriber client symbol redisSub from src/lib/redis.ts",
+        "Channel format pipeline:events:{company_id}",
+        "Supports Last-Event-ID replay with per-company 60s buffer"
+      ]
+    }
+  ],
+  "background_jobs": [
+    {
+      "queue": "ocr-job",
+      "job_name": "process-ocr-document-version",
+      "trigger": "POST /api/uploads/complete enqueue and POST /api/documents/{id}/retry re-enqueue",
+      "payload_schema": { "documentVersionId": "uuid", "companyId": "uuid" },
+      "timeout_ms": 180000,
+      "retry_attempts": 2,
+      "steps": [
+        { "step": 1, "label": "Gate", "detail": "Load document_version and branch by pipeline_status: skip if already at or beyond ocr_done; allow re-entry for ocr_processing and failed; proceed for uploaded." },
+        { "step": 2, "label": "Status update", "detail": "Set pipeline_status='ocr_processing', pipeline_status_updated_at=now(), publish pipeline_stage_changed event." },
+        { "step": 3, "label": "Run row", "detail": "Insert or update pipeline_run as running with started_at now." },
+        { "step": 4, "label": "Fetch source", "detail": "Download original file from R2 object_key into temp buffer; hard fail on missing object." },
+        { "step": 5, "label": "Rasterization", "detail": "If PDF, convert to page PNG buffers at 150 DPI via pdf2pic; if image, wrap as single-page list." },
+        { "step": 6, "label": "OCR per page", "detail": "For each page with concurrency max 4: base64 encode PNG, call PaddleOCR-VL 1.5, parse boxes/text/scores, normalize bboxes to ratios [0..1], upload page image to R2 pages/{n}.png." },
+        { "step": 7, "label": "Chunking", "detail": "Run merge+split: merge adjacent paragraph blocks under 512 tokens and split oversized blocks over 512 tokens at sentence boundaries; produce superseded lineage." },
+        { "step": 8, "label": "Persist blocks", "detail": "Bulk insert evidence_blocks with low_confidence = ocr_confidence < LOW_CONFIDENCE_THRESHOLD and embedding null, embedding_status pending." },
+        { "step": 9, "label": "Finalize OCR", "detail": "Update document_version page_count actual and pipeline_status='ocr_done', update pipeline_run completed, publish pipeline_stage_changed." },
+        { "step": 10, "label": "Fan-out next stage", "detail": "Enqueue embedding-job with documentVersionId/companyId and insert queued pipeline_run record for embedding stage." }
+      ],
+      "error_handling": [
+        "BullMQ retries with exponential backoff 1s then 4s",
+        "On terminal failure call workers/pipeline/dlq.ts: set pipeline_status failed, write pipeline_error_message, notification insert, publish pipeline_failed",
+        "Idempotent safety avoids duplicate block insertion when rerun after ocr_done"
+      ]
+    },
+    {
+      "queue": "embedding-job",
+      "job_name": "process-embedding-document-version",
+      "trigger": "Enqueued at OCR completion",
+      "payload_schema": { "documentVersionId": "uuid", "companyId": "uuid" },
+      "timeout_ms": 120000,
+      "retry_attempts": 2,
+      "steps": [
+        { "step": 1, "label": "Gate", "detail": "Load document_version and skip if already embedded or beyond; allow re-entry from embedding; proceed from ocr_done." },
+        { "step": 2, "label": "Status update", "detail": "Set pipeline_status='embedding' and publish pipeline_stage_changed." },
+        { "step": 3, "label": "Candidate scan", "detail": "Select evidence blocks where document_version_id matches, low_confidence=false, chunk_type!='superseded', embedding IS NULL." },
+        { "step": 4, "label": "Batch partition", "detail": "Split selected blocks into batches of at most 512 texts." },
+        { "step": 5, "label": "External embedding call", "detail": "For each batch call OpenAI text-embedding-3-small and map outputs back to block IDs in order." },
+        { "step": 6, "label": "Persist vectors", "detail": "Bulk update embedding vector and embedding_status='completed' for successful batch items." },
+        { "step": 7, "label": "Partial-failure isolation", "detail": "On batch failure mark only that batch embedding_status='failed' and continue remaining batches." },
+        { "step": 8, "label": "Finalize embedding", "detail": "Set document_version pipeline_status='embedded', update pipeline_run done, publish pipeline_stage_changed." },
+        { "step": 9, "label": "Queue extraction", "detail": "Enqueue extraction-job for Slice 3 and insert queued extraction pipeline_run." }
+      ],
+      "error_handling": [
+        "Single batch failures do not abort job; extraction still runs with reduced evidence set",
+        "Terminal failure path routes through dlq.ts and pipeline_failed event",
+        "Skip branch logs warning if status still before ocr_done"
+      ]
+    },
+    {
+      "queue": "pending-obs-timeout",
+      "job_name": "stale-pipeline-sweep",
+      "trigger": "Repeat every 5 minutes from worker bootstrap",
+      "payload_schema": { "kind": "stale_pipeline_scan" },
+      "timeout_ms": 30000,
+      "retry_attempts": 1,
+      "steps": [
+        { "step": 1, "label": "Find stalled versions", "detail": "Query document_version rows in statuses ocr_processing, embedding, extracting where pipeline_status_updated_at < now()-interval '10 minutes'." },
+        { "step": 2, "label": "Mark failed", "detail": "Update each matched row to pipeline_status='failed' and pipeline_error_message='Pipeline stalled — timed out'." },
+        { "step": 3, "label": "Notify", "detail": "Insert notification rows type pipeline_failed and publish pipeline_failed SSE events." },
+        { "step": 4, "label": "Audit run", "detail": "Record counts in worker logs for observability." }
+      ],
+      "error_handling": [
+        "If sweep fails, next repeat run retries naturally",
+        "Updates are idempotent because already-failed rows are excluded by query predicate"
+      ]
+    }
+  ],
+  "types_and_interfaces": [
+    {
+      "name": "PipelineEvent",
+      "file": "src/lib/pipeline/events.ts",
+      "definition": "type PipelineEvent = { id: number; type: 'pipeline_stage_changed'; documentVersionId: string; documentId: string; pipelineStatus: 'uploaded'|'ocr_processing'|'ocr_done'|'embedding'|'embedded'|'extracting'|'review_ready'|'failed'; timestamp: string } | { id: number; type: 'pipeline_failed'; documentVersionId: string; documentId: string; stage: 'ocr'|'embedding'|'extraction'; error: string; timestamp: string } | { id: number; type: 'extraction_complete'; documentVersionId: string; documentId: string; observationCount: number; timestamp: string } | { id: number; type: 'heartbeat'; timestamp: string };"
+    },
+    {
+      "name": "UploadInitRequest",
+      "file": "src/lib/uploads/validate.ts",
+      "definition": "interface UploadInitRequest { filename: string; fileSize: number; mimeType: 'application/pdf'|'image/png'|'image/jpeg'|'image/webp'|'image/tiff'; pageCount: number; categoryId: string | null; }"
+    },
+    {
+      "name": "UploadCompleteRequest",
+      "file": "src/lib/uploads/validate.ts",
+      "definition": "interface UploadCompleteRequest { objectKey: string; filename: string; pageCount: number; categoryId: string | null; clientId: string | null; }"
+    },
+    {
+      "name": "ParsedBlock",
+      "file": "src/lib/ocr/parse.ts",
+      "definition": "interface ParsedBlock { tempId: string; pageNumber: number; bbox: [number, number, number, number]; text: string; blockType: 'paragraph'|'table_cell'|'header'|'list_item'|'figure_caption'|'other'; ocrConfidence: number; lowConfidence: boolean; chunkType: 'original'|'merged'|'split'|'superseded'; mergedBlockIds: string[] | null; parentBlockId: string | null; }"
+    },
+    {
+      "name": "ChunkingResult",
+      "file": "src/lib/chunking/merge.ts",
+      "definition": "interface ChunkingResult { blocksToInsert: ParsedBlock[]; supersededMap: Record<string, string[]>; }"
+    },
+    {
+      "name": "EmbeddingBatchResult",
+      "file": "src/lib/embeddings/openai.ts",
+      "definition": "interface EmbeddingBatchResult { blockIds: string[]; vectors: number[][]; failed: boolean; error: string | null; }"
+    }
+  ],
+  "constants": [
+    { "name": "LOW_CONFIDENCE_THRESHOLD", "file": "src/lib/constants.ts", "value": "0.70", "purpose": "Flag OCR blocks below confidence threshold and skip embedding" },
+    { "name": "PIPELINE_SSE_HEARTBEAT_MS", "file": "src/lib/pipeline/events.ts", "value": "30000", "purpose": "Keep EventSource connections alive" },
+    { "name": "PIPELINE_REPLAY_TTL_MS", "file": "src/lib/pipeline/events.ts", "value": "60000", "purpose": "Last-Event-ID replay window" },
+    { "name": "PIPELINE_REPLAY_MAX_EVENTS", "file": "src/lib/pipeline/events.ts", "value": "200", "purpose": "Bound in-memory replay buffer" },
+    { "name": "OCR_JOB_TIMEOUT_MS", "file": "src/lib/queues.ts", "value": "180000", "purpose": "BullMQ timeout for ocr-job" },
+    { "name": "EMBEDDING_JOB_TIMEOUT_MS", "file": "src/lib/queues.ts", "value": "120000", "purpose": "BullMQ timeout for embedding-job" },
+    { "name": "EXTRACTION_JOB_TIMEOUT_MS", "file": "src/lib/queues.ts", "value": "300000", "purpose": "Global queue contract retained for next slice" },
+    { "name": "SEMANTIC_CONFLICT_JOB_TIMEOUT_MS", "file": "src/lib/queues.ts", "value": "60000", "purpose": "Global queue contract retained for next slice" },
+    { "name": "RENDER_PDF_JOB_TIMEOUT_MS", "file": "src/lib/queues.ts", "value": "90000", "purpose": "Global queue contract retained for next slice" },
+    { "name": "PENDING_OBS_TIMEOUT_JOB_TIMEOUT_MS", "file": "src/lib/queues.ts", "value": "30000", "purpose": "Global queue contract retained for next slice" },
+    { "name": "STALE_PIPELINE_THRESHOLD_MINUTES", "file": "workers/pipeline/cron/stale-pipeline.ts", "value": "10", "purpose": "Threshold for stalled processing detection" },
+    { "name": "STALE_PIPELINE_SCAN_EVERY_MS", "file": "workers/pipeline/cron/stale-pipeline.ts", "value": "300000", "purpose": "Repeat interval for stale scan" }
+  ],
+  "sse_events": [
+    {
+      "event_name": "pipeline_stage_changed",
+      "payload": {
+        "id": 1,
+        "type": "pipeline_stage_changed",
+        "documentVersionId": "uuid",
+        "documentId": "uuid",
+        "pipelineStatus": "ocr_processing",
+        "timestamp": "2026-02-22T00:00:00.000Z"
+      },
+      "emitted_by": "workers/pipeline/jobs/ocr.ts and workers/pipeline/jobs/embedding.ts via src/lib/pipeline/pubsub.ts",
+      "consumed_by": "src/app/api/pipeline/events/route.ts and client components using PipelineSSEProvider"
+    },
+    {
+      "event_name": "pipeline_failed",
+      "payload": {
+        "id": 2,
+        "type": "pipeline_failed",
+        "documentVersionId": "uuid",
+        "documentId": "uuid",
+        "stage": "ocr",
+        "error": "PaddleOCR API timeout",
+        "timestamp": "2026-02-22T00:00:01.000Z"
+      },
+      "emitted_by": "workers/pipeline/dlq.ts and workers/pipeline/cron/stale-pipeline.ts",
+      "consumed_by": "src/app/api/pipeline/events/route.ts and Documents status UI"
+    },
+    {
+      "event_name": "extraction_complete",
+      "payload": {
+        "id": 3,
+        "type": "extraction_complete",
+        "documentVersionId": "uuid",
+        "documentId": "uuid",
+        "observationCount": 14,
+        "timestamp": "2026-02-22T00:00:02.000Z"
+      },
+      "emitted_by": "Slice 3 extraction job publisher using same pubsub contract established in Slice 2",
+      "consumed_by": "Pipeline SSE stream clients for final stage update"
+    },
+    {
+      "event_name": "heartbeat",
+      "payload": {
+        "id": 4,
+        "type": "heartbeat",
+        "timestamp": "2026-02-22T00:00:30.000Z"
+      },
+      "emitted_by": "src/app/api/pipeline/events/route.ts heartbeat loop every 30 seconds",
+      "consumed_by": "EventSource clients and infrastructure monitors to keep stream alive"
+    }
+  ],
+  "acceptance_criteria": [
+    "Uploading a PDF under 50MB triggers pipeline and DocumentVersion.pipeline_status reaches embedded within 5 minutes p95",
+    "GET /api/documents/{id}/blocks returns at least one evidence block with hasEmbedding=true",
+    "GET /api/pipeline/events delivers pipeline_stage_changed within 2 seconds of each status transition",
+    "GET /api/documents/{id}/pages/1 returns pageImageUrl after OCR and returns 404 code page_not_ready before OCR completion",
+    "Blocks with ocr_confidence < 0.70 persist with low_confidence=true and embedding remains null",
+    "Client-side upload >50MB is rejected before /api/uploads/init call with French validation message",
+    "SSE stream with mismatched company_id returns 403 immediately",
+    "TypeScript compile and Vitest suite pass for added modules",
+    "Re-running OCR job for already completed version is no-op",
+    "Re-running OCR job for crashed ocr_processing version is allowed re-entry",
+    "POST /api/documents/{id}/retry resets failed or stale versions and enqueues ocr-job; returns 409 for non-retriable states",
+    "Stale-pipeline sweep marks versions stuck >10 minutes as failed and inserts notification",
+    "GET /api/documents/{id}/versions returns all document versions sorted by version DESC",
+    "POST /api/uploads/complete with duplicate objectKey returns 200 existing payload without duplicate rows"
+  ],
+  "known_spec_deviations": [
+    {
+      "item": "upload complete initial status naming",
+      "reason": "Slice text contains both uploaded and pending labels in flow examples; implementation standardizes on uploaded to match pipeline_status enum from Slice 1"
+    },
+    {
+      "item": "duplicate objectKey response code",
+      "reason": "Edge-case table mentions 409 while endpoint contract and acceptance require idempotent 200; implementation follows contract+acceptance and returns 200"
+    },
+    {
+      "item": "SSE replay architecture",
+      "reason": "Slice 2 uses in-memory replay buffer for pipeline events; this is acceptable for current scope and later chat replay is upgraded to Redis Streams in Slice 5"
+    },
+    {
+      "item": "PaddleOCR invocation granularity",
+      "reason": "Source keeps this as an open pre-implementation decision (per-page vs per-file). Keep contract neutral until a validation call confirms PaddleOCR-VL multi-page support and timeout behavior."
+    },
+    {
+      "item": "stale-pipeline cron queue reuse",
+      "reason": "The stale-pipeline sweep (workers/pipeline/cron/stale-pipeline.ts) is a BullMQ repeatable/cron job but is assigned to the existing `pending-obs-timeout` queue for convenience rather than a dedicated cron queue. This conflates unrelated queue semantics. In production this should be a dedicated cron queue. Source: implementation_plan.md §2.3 and §2.16."
+    }
+  ],
+  "implementation_order": [
+    "Add shared validation and presign modules: src/lib/uploads/validate.ts and src/lib/uploads/presign.ts",
+    "Implement upload endpoints /api/uploads/init and /api/uploads/complete with idempotency and queue enqueue",
+    "Implement document read endpoints: list/detail/versions/status/blocks/pages/category",
+    "Implement retry endpoint with retriable state gate and stale threshold check",
+    "Implement pipeline event contracts in src/lib/pipeline/events.ts and publisher in src/lib/pipeline/pubsub.ts",
+    "Implement SSE route /api/pipeline/events with heartbeat, company scoping, and Last-Event-ID replay",
+    "Create OCR utilities: pdf2pic conversion, PaddleOCR client, response parser with bbox normalization",
+    "Create chunking utilities: token counting, merge, split",
+    "Create embedding client utility for OpenAI batch embeddings",
+    "Implement pipeline workers: jobs/ocr.ts, jobs/embedding.ts, dlq.ts, health.ts, stale-pipeline cron",
+    "Modify workers/pipeline/index.ts to register queues, handlers, health endpoint, and scheduled sweep",
+    "Create UI components for documents table, status badge, upload flow, and upload retry overlay",
+    "Create PipelineSSEProvider and usePipelineStream hook and mount provider in src/app/(app)/layout.tsx",
+    "Create documents pages /documents and /documents/[id] with optimistic status updates",
+    "Run unit, integration, and E2E checks for upload flow, status transitions, idempotency, and stale recovery"
+  ]
+}

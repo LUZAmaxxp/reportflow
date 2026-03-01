@@ -1,0 +1,404 @@
+                                                                {
+  "slice": 5,
+  "generated_at": "2026-02-22T00:00:00.000Z",
+  "verdict": "FAIL",
+  "verdict_reason": "6 critical issues and 3 failing acceptance criteria block proceeding to Slice 6. The two most severe structural defects are: (1) the agent-loop and pending-obs-timeout background jobs are never consumed by any BullMQ Worker — pending observation timeouts will never fire and the agent architecture deviates from the queued-worker model; (2) the PDF worker Dockerfile CMD passes a .ts file to plain Node 20, meaning the PDF worker container crashes on startup and can never process render-pdf-job. Additionally, the pending_manual_observation DB schema is missing the observation_id FK column, causing the confirm-and-resume flow to be permanently broken, and the report_ready SSE event always emits html_snapshot_url=null.",
+  "static_audit": {
+    "critical_count": 6,
+    "high_count": 5,
+    "medium_count": 17,
+    "low_count": 10,
+    "all_issues": [
+      {
+        "severity": "critical",
+        "source": "background_jobs",
+        "file": "workers/pipeline/index.ts + src/lib/queues.ts",
+        "job": "run_agent_loop",
+        "step": "Worker registration",
+        "description": "No BullMQ Worker is registered anywhere for the 'agent-loop' queue. runAgentLoop() is called inline (fire-and-forget) from the Next.js route handlers instead of being dispatched through BullMQ. The queue-backed worker model required by the plan is absent; the agent loop runs in-process, bypassing all BullMQ retry/timeout semantics.",
+        "plan_reference": "slice_5.json background_jobs[0] — queue='agent-loop', job_name='run_agent_loop'"
+      },
+      {
+        "severity": "critical",
+        "source": "background_jobs + file_completeness",
+        "file": "src/lib/agent/loop.ts",
+        "job": "run_agent_loop",
+        "step": "Step 3 — Handle manual observation waits",
+        "description": "waitForPendingObservation() is defined but never called anywhere in the agent loop. After propose_manual_observation emits the SSE event, the loop immediately continues to the next Grok call without blocking on Redis pub/sub pending-obs:{pending_id}. The Redis pub/sub publish in confirm/route.ts is dead code because no subscriber exists. The core 'pause agent, wait for user input, resume' flow is entirely unimplemented.",
+        "plan_reference": "slice_5.json background_jobs[0] step 3; files[11] — 'propose_manual_observation + await pending-obs pub/sub max 10 min'"
+      },
+      {
+        "severity": "critical",
+        "source": "background_jobs",
+        "file": "workers/pipeline/index.ts",
+        "job": "pending_observation_sweep + pending_observation_delayed_timeout_per_record",
+        "step": "Worker registration and all job steps",
+        "description": "No BullMQ Worker is registered for the 'pending-obs-timeout' queue. pendingObsTimeoutQueue exists only as a Queue (producer) in src/lib/queues.ts; jobs are enqueued by propose-manual-observation.ts, but no consumer processes them. The repeatable sweep is never scheduled. The complete body of both jobs (query expired rows, UPDATE timed_out, publish pending-obs:{pending_id}, log) is absent. Pending observations will accumulate indefinitely and never expire.",
+        "plan_reference": "slice_5.json background_jobs[2] pending_observation_sweep; background_jobs[3] pending_observation_delayed_timeout_per_record"
+      },
+      {
+        "severity": "critical",
+        "source": "database_migrations + file_completeness + api_contracts",
+        "file": "drizzle/migrations/0007_async_audit_rls.sql + src/lib/db/schema/observations.ts + src/app/api/manual-observations/pending/[id]/route.ts",
+        "job": null,
+        "description": "The pending_manual_observation table is missing the observation_id uuid NULL column in both the SQL migration and the Drizzle schema. The confirm route creates an observation but stores no link back to it. GET /api/manual-observations/pending/{id} hardcodes observation_id: null unconditionally. The plan requires returning the actual observation UUID on GET after confirmation, and the SSE resume payload must include observation_id. This is unfixable without a new migration.",
+        "plan_reference": "slice_5.json api_endpoints GET pending/{id} success_response; api_endpoints POST confirm 'updates pending status=confirmed + observation_id'; files[5] 'GET returns {pending_id, status, observation_id, created_at, expires_at}'"
+      },
+      {
+        "severity": "critical",
+        "source": "file_completeness + background_jobs",
+        "file": "workers/pdf/Dockerfile",
+        "job": "render_report_pdf",
+        "step": "Container startup",
+        "description": "The Dockerfile CMD is ['node', '--max-old-space-size=512', 'workers/pdf/index.ts']. Node 20 (node:20-slim) cannot parse TypeScript — --experimental-strip-types requires Node 22.6+. The Dockerfile also runs 'npm ci --omit=dev', excluding tsx (devDependency). No tsc compile step exists. The PDF worker container crashes immediately on startup with a SyntaxError and never processes any render-pdf-job.",
+        "plan_reference": "slice_5.json files[28] 'node --max-old-space-size=512 command'; acceptance_criterion 12 'PDF worker builds/runs independently'"
+      },
+      {
+        "severity": "critical",
+        "source": "sse_types_constants",
+        "file": "src/lib/agent/loop.ts + src/lib/mcp/render-pdf.ts",
+        "job": null,
+        "description": "The report_ready SSE event is emitted with html_snapshot_url: toolResultData.html_snapshot_url ?? null, but render_pdf returns {report_id, pdf_url} — it never returns html_snapshot_url. The field is therefore always null in the emitted event. The ChatSseEvent type and ReportReadyContent both declare html_snapshot_url as non-nullable string, creating a type lie at runtime. The frontend ReportReadyCard receives url=null and cannot navigate to the HTML snapshot.",
+        "plan_reference": "slice_5.json sse_events[3] report_ready payload; types_and_interfaces ChatSseEvent ReportReadyEvent"
+      },
+      {
+        "severity": "high",
+        "source": "file_completeness",
+        "file": "src/components/chat/ManualObsPopup.tsx",
+        "job": null,
+        "step": null,
+        "description": "The confirm POST body never includes data_type or time_behavior — both are required enum fields by the API. The API returns 422 for every confirm action. Also, the popup sends 'attestation_note' but the API expects 'note', silently dropping the note field.",
+        "plan_reference": "slice_5.json files[40] 'all popup fields/validations'; api_endpoints POST confirm validation_rules"
+      },
+      {
+        "severity": "high",
+        "source": "api_contracts + file_completeness",
+        "file": "src/app/api/reports/[id]/regenerate/route.ts",
+        "job": null,
+        "step": null,
+        "description": "The 409 generation_in_progress guard is entirely absent. Two simultaneous POST /api/reports/{id}/regenerate calls will spawn two parallel agent loops for the same report, risking duplicate report rows and data corruption.",
+        "plan_reference": "slice_5.json api_endpoints POST regenerate error_responses 409 generation_in_progress; files[11] '409 generation_in_progress'"
+      },
+      {
+        "severity": "high",
+        "source": "background_jobs",
+        "file": "workers/pdf/jobs/render.ts",
+        "job": "render_report_pdf",
+        "step": "Step 1 — Load report and verify companyId",
+        "description": "The PDF worker job handler does not query the DB to verify report ownership by companyId before fetching and rendering HTML from R2. Tenant isolation is only enforced on the MCP enqueue side but not in the worker itself, meaning a crafted job payload could render a report belonging to a different tenant.",
+        "plan_reference": "slice_5.json background_jobs[1] step 1 'Verify report exists in ctx.companyId'"
+      },
+      {
+        "severity": "high",
+        "source": "sse_types_constants",
+        "file": "src/lib/agent/streaming.ts vs src/lib/agent/loop.ts",
+        "job": null,
+        "step": null,
+        "description": "The plan specifies done is emitted_by src/lib/agent/streaming.ts. In the implementation, streaming.ts never emits a done event; done is exclusively emitted in loop.ts. If streaming.ts is used outside runAgentLoop in the future, clients will hang indefinitely.",
+        "plan_reference": "slice_5.json sse_events[5] done emitted_by"
+      },
+      {
+        "severity": "high",
+        "source": "background_jobs",
+        "file": "src/lib/agent/loop.ts",
+        "job": "run_agent_loop",
+        "step": "Payload deserialization",
+        "description": "Because there is no BullMQ worker, the payload fields (session_id, user_message_id, mode, report_id, observation_ids, derivation_result_ids) are never deserialized from job.data. companyId and userId are injected directly from the HTTP session. The regenerate path (mode=regenerate) with pre-seeded observation_ids and derivation_result_ids will be silently ignored.",
+        "plan_reference": "slice_5.json background_jobs[0] payload_schema; files[11] 'enqueues agent-loop mode=regenerate'"
+      },
+      {
+        "severity": "medium",
+        "source": "file_completeness",
+        "file": "src/app/api/chat/sessions/[id]/stream/route.ts",
+        "description": "Implementation uses XREAD BLOCK 5000 (5s timeout with heartbeat loop) instead of the plan-specified XREAD BLOCK 0 (indefinite block). The behavior is functionally equivalent but deviates from spec.",
+        "plan_reference": "slice_5.json files[3] 'XREAD BLOCK 0'"
+      },
+      {
+        "severity": "medium",
+        "source": "file_completeness",
+        "file": "src/lib/mcp/compute-derivation.ts",
+        "description": "When coverage.fraction < 0.50, the code only logs console.warn. The plan requires signalling insufficient_coverage to the caller/Grok so the agent can warn the user. The returned object has no distinct status field for this case.",
+        "plan_reference": "slice_5.json files[18] 'insufficient_coverage below 0.50'"
+      },
+      {
+        "severity": "medium",
+        "source": "file_completeness",
+        "file": "src/app/(app)/reports/page.tsx",
+        "description": "Status filter SelectItems use values 'generating'/'ready'/'error' which do not match DB enum values 'draft'/'final'. Filtering returns no results. Also, client_id filter is absent from the UI despite being listed in the plan.",
+        "plan_reference": "slice_5.json files[32] 'filters client_id/status'"
+      },
+      {
+        "severity": "medium",
+        "source": "file_completeness",
+        "file": "src/app/(app)/reports/[id]/page.tsx",
+        "description": "Polling continuation checks status !== 'ready' but the DB enum only contains 'draft' and 'final' — never 'ready'. The condition is always true, making polling reliant solely on pdf_url becoming non-null to terminate.",
+        "plan_reference": "slice_5.json files[33] '3s polling while pdf_url null'"
+      },
+      {
+        "severity": "medium",
+        "source": "file_completeness",
+        "file": "src/components/chat/MessageBubble.tsx",
+        "description": "agent_text messages are rendered with whitespace-pre-wrap plain text with a TODO comment about react-markdown. The plan requires left-aligned markdown rendering with a streaming cursor.",
+        "plan_reference": "slice_5.json files[35] 'agent_text left markdown with streaming cursor'"
+      },
+      {
+        "severity": "medium",
+        "source": "file_completeness",
+        "file": "src/app/api/reports/[id]/regenerate/route.ts",
+        "description": "mem0 write uses a 5s AbortController timeout but has no retry logic. The plan requires '5s timeout + 1 retry'.",
+        "plan_reference": "slice_5.json files[11] 'optional mem0 write 5s+1retry'"
+      },
+      {
+        "severity": "medium",
+        "source": "api_contracts",
+        "file": "src/app/api/chat/sessions/route.ts",
+        "description": "POST and GET /api/chat/sessions check authentication but perform no role-based authorization. Any role outside admin/editor/viewer (or a missing role claim) is not rejected.",
+        "plan_reference": "slice_5.json api_endpoints POST /api/chat/sessions roles_allowed"
+      },
+      {
+        "severity": "medium",
+        "source": "api_contracts",
+        "file": "src/app/api/reports/[id]/regenerate/route.ts",
+        "description": "The 403 forbidden branch is dead code. withTenant filters by companyId, so cross-tenant reports return null and hit 404. The distinct 403 error code is unreachable.",
+        "plan_reference": "slice_5.json api_endpoints POST regenerate error_responses 403 forbidden"
+      },
+      {
+        "severity": "medium",
+        "source": "api_contracts",
+        "file": "src/app/api/reports/[id]/regenerate/route.ts",
+        "description": "Response returns version: sourceReport.version + 1 but the new report row is only created asynchronously by the (non-queued) agent loop. The version in the 201 response refers to a report that does not yet exist in the DB, breaking consumers that immediately call GET /api/reports/{id}.",
+        "plan_reference": "slice_5.json api_endpoints POST regenerate success_response 201"
+      },
+      {
+        "severity": "medium",
+        "source": "api_contracts",
+        "file": "src/app/api/reports/[id]/versions/route.ts",
+        "description": "Each version item maps generatedAt to 'created_at' instead of the spec-required 'generated_at'. Consumers expecting generated_at receive undefined.",
+        "plan_reference": "slice_5.json api_endpoints GET versions success_response versions[].generated_at"
+      },
+      {
+        "severity": "medium",
+        "source": "database_migrations",
+        "file": "src/lib/db/schema/notifications.ts",
+        "description": "chat_session.title is defined as plain text() in the Drizzle schema with no CHECK constraint. The SQL migration enforces char_length(title) <= 200 at the DB level, but if schema-push or introspection is used, the 200-char limit will be silently dropped.",
+        "plan_reference": "slice_5.json — 'title (char 200)' specification"
+      },
+      {
+        "severity": "medium",
+        "source": "background_jobs",
+        "file": "workers/pdf/pool.ts",
+        "description": "PuppeteerPool.acquire() pushes callers to a waitQueue with no timeout. The plan requires a 30s timeout via Promise.race for browser acquisition. Under sustained load, jobs can queue indefinitely.",
+        "plan_reference": "slice_5.json background_jobs[1] step 3 '30s timeout Promise.race'"
+      },
+      {
+        "severity": "medium",
+        "source": "background_jobs",
+        "file": "src/lib/mcp/render-pdf.ts",
+        "description": "The DB polling fallback (pollForPdfKey) queries the report table without withTenant or companyId scoping, bypassing row-level security.",
+        "plan_reference": "slice_5.json background_jobs[1] step 6; Slice 1 RLS model"
+      },
+      {
+        "severity": "medium",
+        "source": "sse_types_constants",
+        "file": "src/lib/agent/loop.ts",
+        "description": "The tool_call SSE event is emitted with only {tool_name, summary}. The details field is never populated even as an empty object, causing UI consumers that destructure details to receive undefined.",
+        "plan_reference": "slice_5.json sse_events[1] tool_call payload {tool_name, summary, details: {}}"
+      },
+      {
+        "severity": "medium",
+        "source": "sse_types_constants",
+        "file": "src/lib/queues.ts + src/lib/constants.ts",
+        "description": "The timeout constant is named QUEUE_TIMEOUT_MS and lives in src/lib/constants.ts, not BULLMQ_QUEUE_TIMEOUTS in queues.ts as specified. More critically, none of the Queue instances in queues.ts pass a defaultJobOptions.timeout, so per-job timeout enforcement is absent at BullMQ level.",
+        "plan_reference": "slice_5.json constants BULLMQ_QUEUE_TIMEOUTS"
+      },
+      {
+        "severity": "medium",
+        "source": "sse_types_constants",
+        "file": "src/app/api/reports/route.ts",
+        "description": "ReportDetail and ReportVersionsResponse are not defined as named exported types in src/app/api/reports/route.ts. The route handlers use anonymous inline object types, preventing cross-file type sharing.",
+        "plan_reference": "slice_5.json types_and_interfaces ReportsApiShapes"
+      },
+      {
+        "severity": "low",
+        "source": "file_completeness",
+        "file": "src/lib/agent/session-buffer.ts",
+        "description": "readNewEvents creates and destroys a new ioredis connection on every call, called in a tight loop for the lifetime of each SSE connection. Should use a shared per-connection subscriber Redis client.",
+        "plan_reference": "slice_5.json files[14] 'XREAD BLOCK for live'"
+      },
+      {
+        "severity": "low",
+        "source": "file_completeness",
+        "file": "src/app/api/reports/[id]/versions/route.ts",
+        "description": "Lineage traversal fetches ALL company reports in memory and filters via JavaScript — O(N) for companies with many reports. Should use a recursive CTE.",
+        "plan_reference": "slice_5.json files[10] version chain"
+      },
+      {
+        "severity": "low",
+        "source": "api_contracts",
+        "file": "src/app/api/reports/[id]/regenerate/route.ts",
+        "description": "The language body field is parsed but never forwarded to runAgentLoop. Passing it has no effect.",
+        "plan_reference": "slice_5.json api_endpoints POST regenerate request_body language?"
+      },
+      {
+        "severity": "low",
+        "source": "api_contracts",
+        "file": "src/app/api/reports/route.ts",
+        "description": "List response items include undocumented extra fields: title (synthesised) and created_at (duplicate of generated_at).",
+        "plan_reference": "slice_5.json api_endpoints GET /api/reports success_response shape"
+      },
+      {
+        "severity": "low",
+        "source": "api_contracts",
+        "file": "src/app/api/reports/[id]/route.ts",
+        "description": "Response includes undocumented title and created_at fields beyond the spec-defined shape.",
+        "plan_reference": "slice_5.json api_endpoints GET /api/reports/{id} success_response shape"
+      },
+      {
+        "severity": "low",
+        "source": "api_contracts",
+        "file": "src/app/api/reports/[id]/versions/route.ts",
+        "description": "Each version item includes an undocumented title field not present in the spec shape.",
+        "plan_reference": "slice_5.json api_endpoints GET /api/reports/{id}/versions success_response shape"
+      },
+      {
+        "severity": "low",
+        "source": "api_contracts",
+        "file": "src/app/api/chat/sessions/[id]/messages/route.ts",
+        "description": "GET messages response items include an undocumented created_at field beyond the spec {message_id, type, content} shape.",
+        "plan_reference": "slice_5.json api_endpoints GET messages success_response shape"
+      },
+      {
+        "severity": "low",
+        "source": "sse_types_constants",
+        "file": "workers/pdf/pool.ts + src/lib/env.ts",
+        "description": "PUPPETEER_EXECUTABLE_PATH is accessed via raw process.env without passing through the validated env.ts schema. PUPPETEER_SKIP_DOWNLOAD is not referenced anywhere in the runtime codebase.",
+        "plan_reference": "slice_5.json env_vars_required PUPPETEER_EXECUTABLE_PATH, PUPPETEER_SKIP_DOWNLOAD"
+      },
+      {
+        "severity": "low",
+        "source": "sse_types_constants",
+        "file": "src/lib/mcp/create-report.ts + src/lib/agent/tools.ts",
+        "description": "CreateReportInput has two undocumented fields (source_report_id, style_snapshot) absent from the AGENT_TOOLS JSON schema in tools.ts. Grok cannot pass these fields, making versioning and style features silently unreachable via the agent.",
+        "plan_reference": "slice_5.json types_and_interfaces CreateReportInputOutput"
+      },
+      {
+        "severity": "low",
+        "source": "database_migrations",
+        "file": "src/lib/db/schema/observations.ts",
+        "description": "observation.source_reference and observation.note are stored on attestation_record instead of observation directly. This is consistent between migration and schema (no divergence) and the confirm endpoint correctly routes writes to attestation_record.",
+        "plan_reference": "slice_5.json api_endpoints POST confirm source_reference/note"
+      }
+    ]
+  },
+  "acceptance_criteria_results": [
+    {
+      "criterion": "POST /api/chat/sessions/{id}/messages returns 202 immediately and agent output is asynchronous over SSE.",
+      "result": "PASS",
+      "evidence": "src/app/api/chat/sessions/[id]/messages/route.ts calls runAgentLoop without await (fire-and-forget .catch). Handler immediately returns NextResponse.json({ message_id }, { status: 202 }). Agent loop writes to Redis Stream via appendEvent; SSE endpoint delivers events asynchronously.",
+      "notes": null
+    },
+    {
+      "criterion": "GET /api/chat/sessions/{id}/stream emits token events then done and supports Last-Event-ID replay without losing events across reconnect.",
+      "result": "PASS",
+      "evidence": "stream/route.ts reads Last-Event-ID header and calls replayEvents(id, lastEventId) → XRANGE from lastEventId+1 (no gap). readNewEvents uses XREAD BLOCK 5s with heartbeat loop. Each SSE frame carries 'id:' field for browser reconnect tracking. streaming.ts emits event_name:'token' per Grok delta; loop.ts emits event_name:'done' on completion.",
+      "notes": "XREAD BLOCK 5000 deviates from BLOCK 0 spec but replay semantics are correctly implemented."
+    },
+    {
+      "criterion": "propose_manual_observation emits manual_obs_request; popup opens prefilled; confirm creates approved observation and resumes chat.",
+      "result": "FAIL",
+      "evidence": "PASS (partial): proposeManualObservation correctly inserts pending row and calls appendEvent with event_name:'manual_obs_request'. ChatShell handles the event, opens ManualObsPopup prefilled. confirm/route.ts inserts observation status='approved'. FAIL (resume): waitForPendingObservation is defined in loop.ts but never called — agent does not pause. Redis publish in confirm/route.ts is dead code (no subscriber). Chat never resumes after manual observation.",
+      "notes": "The 'resumes chat' half is structurally unimplemented. The agent proceeds past propose_manual_observation immediately."
+    },
+    {
+      "criterion": "create_report uploads HTML snapshot to R2 and persists html_snapshot_r2_key; render_pdf enqueues render-pdf-job and eventually emits report_ready.",
+      "result": "PASS",
+      "evidence": "create-report.ts: PutObjectCommand uploads to R2, UPDATE sets html_snapshot_r2_key. render-pdf.ts: renderPdfQueue.add('render_report_pdf', ...) enqueues job. loop.ts: appendEvent called with event_name='report_ready' after render_pdf returns.",
+      "notes": "report_ready.html_snapshot_url is always null (render_pdf return does not include it); see separate critical issue."
+    },
+    {
+      "criterion": "GET /api/reports excludes html_snapshot_url in list response.",
+      "result": "PASS",
+      "evidence": "src/app/api/reports/route.ts Drizzle select projection explicitly names only {report_id, version, status, language, generated_at, client_id, source_report_id}. htmlSnapshotR2Key is not selected. Code comment documents this as RISK-15 resolution.",
+      "notes": null
+    },
+    {
+      "criterion": "GET /api/reports/{id} returns fresh presigned html_snapshot_url valid for one hour and pdf_url null-or-url depending on readiness.",
+      "result": "PASS",
+      "evidence": "src/app/api/reports/[id]/route.ts calls getSignedUrl with expiresIn: 3600 for html_snapshot_r2_key unconditionally. pdf_url: null if pdf_r2_key is falsy, otherwise getSignedUrl(expiresIn:3600) for pdf key.",
+      "notes": null
+    },
+    {
+      "criterion": "ReportDetail renders HTML via sandboxed iframe and does not use dangerouslySetInnerHTML.",
+      "result": "PASS",
+      "evidence": "src/components/reports/ReportIframe.tsx renders <iframe sandbox='allow-scripts allow-same-origin'> with no dangerouslySetInnerHTML. src/app/(app)/reports/[id]/page.tsx renders <ReportIframe htmlSnapshotUrl={...} /> exclusively.",
+      "notes": null
+    },
+    {
+      "criterion": "GET /api/reports/{id}/versions returns lineage chain with correct source_report_id references after regeneration.",
+      "result": "CANNOT_VERIFY_STATICALLY",
+      "evidence": "versions/route.ts reads sourceReportId from DB and returns it. create-report.ts persists sourceReportId: input.source_report_id ?? null. However, whether source_report_id is passed to create_report during regeneration depends on the LLM agent following a natural-language hint in the system prompt; no code-level enforcement exists.",
+      "notes": "Static code is correctly wired; correctness depends on model behavior at runtime."
+    },
+    {
+      "criterion": "GET /api/manual-observations/pending/{id} returns pending status payload fields exactly as specified.",
+      "result": "FAIL",
+      "evidence": "src/app/api/manual-observations/pending/[id]/route.ts returns all five field names but observation_id is unconditionally hardcoded to null. The pending_manual_observation table has no observation_id column. A confirmed record returns observation_id: null instead of the created observation UUID.",
+      "notes": "Both the DB schema and the route implementation need changes."
+    },
+    {
+      "criterion": "POST /api/manual-observations/pending/{id}/confirm returns 409 for non-pending terminal records.",
+      "result": "PASS",
+      "evidence": "confirm/route.ts checks if (pending.status !== 'pending') inside a transaction, returning error sentinel 'pending_not_pending'. The outer dispatch maps this to NextResponse.json({ code: 'pending_not_pending' }, { status: 409 }), covering all terminal states.",
+      "notes": null
+    },
+    {
+      "criterion": "All MCP tools derive company scope from AgentContext.companyId and do not accept company_id in tool input.",
+      "result": "PASS",
+      "evidence": "All 10 registered MCP tools (search-observations, search-evidence, compute-derivation, propose-manual-observation, create-report, render-pdf, get-categories, merge-observations, get-report-data, get-preferences) use ctx.companyId for DB scoping. None of their input schemas declare a company_id field.",
+      "notes": null
+    },
+    {
+      "criterion": "PDF worker builds/runs independently and processes render-pdf-job even when Next.js app process is unavailable.",
+      "result": "FAIL",
+      "evidence": "Architecture is correctly isolated: workers/pdf/db.ts has its own DB pool, health.ts runs standalone HTTP server on port 3003, no Next.js imports. However, Dockerfile CMD is ['node', '--max-old-space-size=512', 'workers/pdf/index.ts'] — Node 20 cannot parse TypeScript. npm ci --omit=dev excludes tsx. No compile step exists. Container crashes on startup.",
+      "notes": "Fix: add tsc build step and point CMD at compiled .js output, or move tsx to dependencies."
+    }
+  ],
+  "criteria_pass_count": 8,
+  "criteria_fail_count": 3,
+  "criteria_unverifiable_count": 1,
+  "cleared_to_proceed": false,
+  "blocking_issues": [
+    "CRITICAL: No BullMQ Worker registered for 'agent-loop' queue — agent runs in-process with no retry/timeout semantics",
+    "CRITICAL: waitForPendingObservation() dead code — agent never pauses for manual observation; propose_manual_observation confirm-and-resume flow is broken end-to-end",
+    "CRITICAL: No BullMQ Worker or job body for 'pending-obs-timeout' queue — pending observations never expire",
+    "CRITICAL: pending_manual_observation DB schema missing observation_id column — requires new migration; GET endpoint always returns observation_id: null",
+    "CRITICAL: workers/pdf/Dockerfile CMD passes .ts file to plain node — PDF worker container cannot start (Node 20 cannot run TypeScript)",
+    "CRITICAL: report_ready SSE event html_snapshot_url is always null — render_pdf return does not include the HTML URL; frontend ReportReadyCard cannot navigate to report",
+    "HIGH: ManualObsPopup.tsx confirm POST missing data_type and time_behavior required fields — every user confirm action fails with 422",
+    "HIGH: POST /api/reports/{id}/regenerate missing 409 generation_in_progress guard — concurrent regeneration not prevented",
+    "FAIL (criterion 3): propose_manual_observation + confirm + resume flow broken — agent does not await user input",
+    "FAIL (criterion 9): GET /api/manual-observations/pending/{id} observation_id always null — payload fields not exact as specified",
+    "FAIL (criterion 12): PDF worker Docker container crashes on startup — worker is non-functional"
+  ],
+  "recommended_fixes": [
+    "Register a BullMQ Worker in workers/pipeline/index.ts for queue 'agent-loop' that deserializes payload and calls runAgentLoop; remove the inline fire-and-forget pattern from route handlers",
+    "In src/lib/agent/loop.ts, call waitForPendingObservation(pending_id, ctx) immediately after toolDispatch returns propose_manual_observation result; ensure the Redis subscribe/resolve loop is wired to the agent execution flow",
+    "Create workers/pipeline/jobs/pending-obs-timeout.ts implementing sweep and delayed timeout handler; register Worker for 'pending-obs-timeout' in workers/pipeline/index.ts; schedule repeatable job on startup",
+    "Add migration 0008 (or patch 0007) to add observation_id uuid NULL FK column to pending_manual_observation table; update Drizzle schema in src/lib/db/schema/observations.ts; update confirm route to write observation_id; update GET route to return actual observation_id",
+    "Fix workers/pdf/Dockerfile: either (a) add RUN npx tsc --project tsconfig.workers.json build step and change CMD to ['node', '--max-old-space-size=512', 'dist/workers/pdf/index.js'], or (b) move tsx to dependencies and use CMD ['npx', 'tsx', 'workers/pdf/index.ts']",
+    "In src/lib/agent/loop.ts, carry html_snapshot_url from create_report output forward to the report_ready SSE emit; the URL is available as createReportResult.html_snapshot_url but is not passed to the render_pdf step or stored for later use",
+    "In src/components/chat/ManualObsPopup.tsx, add data_type (enum select) and time_behavior (enum select) fields to the confirm form and include them in the POST body; rename attestation_note key to note",
+    "Add generation_in_progress guard to src/app/api/reports/[id]/regenerate/route.ts: before dispatching agent loop, query for any active report derived from the same root with status='generating' (or BullMQ job active state) and return 409 if found",
+    "Fix src/app/(app)/reports/page.tsx status filter values to use 'draft'/'final'; add client_id filter UI control",
+    "Fix src/app/(app)/reports/[id]/page.tsx polling termination condition from status !== 'ready' to check pdf_url presence only; remove incorrect status check",
+    "Install react-markdown and implement markdown rendering for agent_text messages in src/components/chat/MessageBubble.tsx",
+    "In src/app/api/reports/[id]/versions/route.ts, rename 'created_at' mapping to 'generated_at' to match spec",
+    "In src/lib/mcp/compute-derivation.ts, add insufficient_coverage field to output when fraction < 0.50 so Grok can signal the user",
+    "Add one retry to mem0 write in src/app/api/reports/[id]/regenerate/route.ts",
+    "Add per-acquire timeout (30s Promise.race) to PuppeteerPool.acquire() in workers/pdf/pool.ts",
+    "Add withTenant scoping to the DB polling fallback in src/lib/mcp/render-pdf.ts pollForPdfKey",
+    "Add source_report_id and style_snapshot fields to the AGENT_TOOLS JSON schema in src/lib/agent/tools.ts so Grok can pass them to create_report",
+    "Apply QUEUE_TIMEOUT_MS values as defaultJobOptions.timeout when constructing each Queue in src/lib/queues.ts"
+  ]
+}

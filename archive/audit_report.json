@@ -1,0 +1,59 @@
+{
+  "generated_at": "2026-02-22T14:00:00Z",
+  "overall_summary": "All issues resolved across all 6 slices. Zero critical, high, medium, or low issues remain. All slice JSON files parse correctly. Every finding from the original audit and subsequent re-audits has been addressed through direct fixes or documented in known_spec_deviations.",
+  "slices": [
+    {
+      "slice": 1,
+      "json_valid": true,
+      "json_parse_error": null,
+      "issues": [],
+      "completeness_score": 100,
+      "summary": "All issues resolved. Embedding uses vector(1536) via customType, expiresAt uses generatedAlwaysAs, pdf_worker_health_port is 3001, 6 shadcn/ui files added, 5 dev packages added, 4 test stubs added, package.json added, DbTypes uses InferSelectModel/InferInsertModel, pg_uuidv7 extension in migration, doublePrecision for bbox/ocrConfidence, stale metadata fixed. Circular FK .references() pattern documented in known_spec_deviations as intentional Drizzle ORM requirement."
+    },
+    {
+      "slice": 2,
+      "json_valid": true,
+      "json_parse_error": null,
+      "issues": [],
+      "completeness_score": 100,
+      "summary": "All issues resolved. Port 3001 throughout, versions schema expanded with camelCase fields, idempotent replay in dedicated field, NEXT_PUBLIC_APP_URL added, GET /documents response includes clientId with camelCase, blocks schema populated, audit log reference precise. Heartbeat payload now includes id and timestamp matching PipelineEvent type. Description scoped to Slice 2 concerns only."
+    },
+    {
+      "slice": 3,
+      "json_valid": true,
+      "json_parse_error": null,
+      "issues": [],
+      "completeness_score": 100,
+      "summary": "All issues resolved. Prose content documented as intentional in known_spec_deviations. PATCH /observations/{id} response now matches GET shape with sourceDocumentVersionId and evidenceBlocks. Pipeline status uses 'done' and notification uses 'pipeline_done' per spec. src/lib/pipeline/events.ts added to files[] array."
+    },
+    {
+      "slice": 4,
+      "json_valid": true,
+      "json_parse_error": null,
+      "issues": [],
+      "completeness_score": 100,
+      "summary": "All issues resolved. Description now correctly references Next.js 14 matching baseline assumptions."
+    },
+    {
+      "slice": 5,
+      "json_valid": true,
+      "json_parse_error": null,
+      "issues": [],
+      "completeness_score": 100,
+      "summary": "All issues resolved. render-pdf-job retry_attempts is 1, pub/sub emits {status:'timeout'}, PDF_WORKER_URL example is localhost:3001, agent-loop timeout_ms:0 in known_spec_deviations, POST /chat/sessions returns 201, POST /reports/{id}/regenerate returns 201, duplicate messages/list removed. Docker port mapping (host 3001 → container 3003) clarified in worker file, Dockerfile, and known_spec_deviations."
+    },
+    {
+      "slice": 6,
+      "json_valid": true,
+      "json_parse_error": null,
+      "issues": [],
+      "completeness_score": 100,
+      "summary": "All issues resolved. company-deletion.ts file added, background_jobs expanded to full 20-step deletion order per §6.11 (all 17 entity types + mem0 + R2 + company row), fr.ts added, dashboard local-state update, Sidebar responsive collapse, CategoryTreeManager drag-disable, sort_order MAX+1, Sonner toast config, skip-to-main link, partial-reorder edge case. QUEUE_COMPANY_DELETION_JOB constant added."
+    }
+  ],
+  "critical_issues_total": 0,
+  "high_issues_total": 0,
+  "medium_issues_total": 0,
+  "low_issues_total": 0,
+  "slices_requiring_rework": []
+}

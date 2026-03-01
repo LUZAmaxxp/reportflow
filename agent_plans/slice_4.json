@@ -1,0 +1,796 @@
+{
+  "slice": 4,
+  "title": "Conflicts + Manual Observations + Notifications",
+  "description": "Implements semantic conflict detection (BullMQ semantic-conflict-job + Grok equivalence classifier + KeyEquivalenceCache), conflict inbox resolution APIs/UI, manual observation creation with attestation, and live notification delivery over the existing pipeline SSE channel. Stack context: PostgreSQL 16 + pgvector + pg_trgm, Drizzle ORM, BullMQ + Redis, Cloudflare R2, Next.js 14 App Router, Auth.js credentials+JWT, PaddleOCR-VL 1.5, Grok grok-4-1-fast-reasoning, OpenAI text-embedding-3-small, mem0, strict TypeScript. Deployment context: three processes (Next.js app :3000, pipeline worker health :3002, PDF worker health :3003).",
+  "depends_on_slices": [1, 2, 3],
+  "env_vars_required": [
+    {
+      "key": "DATABASE_URL",
+      "description": "PostgreSQL connection used by Next.js API handlers and pipeline worker for conflict/notification writes and reads.",
+      "example": "postgresql://user:pass@localhost:5432/reportflow"
+    },
+    {
+      "key": "REDIS_URL",
+      "description": "BullMQ backend and Redis pub/sub transport for pipeline SSE + notification events.",
+      "example": "redis://localhost:6379"
+    },
+    {
+      "key": "XAI_API_KEY",
+      "description": "Grok API key used by semantic equivalence classifier for uncached key pairs.",
+      "example": "xai_live_********************************"
+    },
+    {
+      "key": "NEXTAUTH_URL",
+      "description": "Auth.js server URL required for authenticated API and SSE session handling.",
+      "example": "http://localhost:3000"
+    },
+    {
+      "key": "NEXTAUTH_SECRET",
+      "description": "Auth.js JWT/cookie signing secret; JWT payload shape is { user_id, company_id, role }.",
+      "example": "base64:3s3xF2f7z2K9cQfJ6K8+3F2KJjv4Q6v6Pq1Vq1hJxvM="
+    },
+    {
+      "key": "AUTH_TRUST_HOST",
+      "description": "Required for production reverse-proxy deployments with Auth.js.",
+      "example": "true"
+    }
+  ],
+  "packages_to_install": [
+    {
+      "name": "date-fns",
+      "version": "^4.1.0",
+      "dev": false
+    }
+  ],
+  "files": [
+    {
+      "action": "create",
+      "path": "src/lib/conflicts/cacheKey.ts",
+      "purpose": "Canonical pair hashing utility for KeyEquivalenceCache lookups and inserts.",
+      "sections": [
+        {
+          "label": "module-content",
+          "content": "Export buildCacheKey(keyA: string, keyB: string): string that sorts the two keys alphabetically, joins with ':', computes SHA-256, and returns a lowercase hex digest. Enforce deterministic output so buildCacheKey('b','a') equals buildCacheKey('a','b')."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/conflicts/applyLatestWins.ts",
+      "purpose": "Winner selection for conflict pairs using provenance-aware timestamps.",
+      "sections": [
+        {
+          "label": "module-content",
+          "content": "Export latestWins(obsA, obsB) that resolves source timestamps as: provenance_type=document -> document_version.uploaded_at; provenance_type=manual -> attestation_record.created_at. Return { winner, loser }. If timestamps are equal, return obsA as winner and log anomaly. If document embedded doc_date differs from uploaded_at by >30 days, log anomaly_notice without changing winner."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/conflicts/equivalenceClassifier.ts",
+      "purpose": "Grok-based normalized key equivalence classification for semantic conflict detection.",
+      "sections": [
+        {
+          "label": "module-content",
+          "content": "Export callGrokEquivalence(input) with 30s timeout. Prompt: Are these two ESG observation keys referring to the same real-world metric? Include key/label/unit for A and B. Require response first token SAME_KEY or DIFFERENT_KEY, then rationale. Parse token and rationale. On malformed response, log parse error and return DIFFERENT_KEY conservatively. Model identifier: grok-4-1-fast-reasoning."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/conflicts/detectSemantic.ts",
+      "purpose": "Candidate pair query builder based on pg_trgm similarity + unit/time overlap.",
+      "sections": [
+        {
+          "label": "module-content",
+          "content": "Export findCandidatePairs(db, observationId, companyId) that loads obs_a and queries approved obs_b where company_id matches, id != observationId, similarity(obs_b.normalized_key, obs_a.normalized_key) >= 0.5 OR obs_b.unit = obs_a.unit, and period ranges overlap (obs_b.period_start <= obs_a.period_end AND obs_b.period_end >= obs_a.period_start)."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/jobs/semanticConflict.ts",
+      "purpose": "BullMQ consumer for semantic-conflict-job with cache, classifier, latest-wins, conflict inserts, stale marking, and event publication.",
+      "sections": [
+        {
+          "label": "module-content",
+          "content": "Implement processSemanticConflictJob(job) for queue semantic-conflict-job. Step 1: load obs_a and skip if status != approved. Step 2: generate candidates via pg_trgm query. Step 3 per candidate: exact-key short-circuit, else cache lookup by canonical key pair, else call Grok and insert key_equivalence_cache with ON CONFLICT DO NOTHING. Step 4 for SAME_KEY/exact: normalize/compare numeric values and skip when equal within 0.1%; determine winner via latestWins; insert conflict_case with auto_resolved=true, resolution_status=auto_resolved, match_method exact|semantic, observation_ids [a,b], winning_observation_id, and idempotent pair uniqueness guard; if insert skipped, continue. Step 5: set loser status superseded; mark derivation_results stale where loser in input_observation_ids. Step 6: insert notification row type conflict_detected payload { conflictId, normalizedKey }; publishNotification(companyId, notification). Step 7: publishPipelineEvent(companyId, { type: conflict_detected, conflictId, normalizedKey, matchMethod, timestamp }). Retry attempts: 3 with exponential backoff 2s/4s/8s. Grok timeout/failure must not fail job; log and continue."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/notifications/publish.ts",
+      "purpose": "Notification persistence + Redis pub/sub fan-out to existing pipeline SSE channel.",
+      "sections": [
+        {
+          "label": "module-content",
+          "content": "Export publishNotification(companyId, input) that inserts into notification table, computes unreadCount using SELECT COUNT(*) scoped to company/user semantics, and publishes JSON event to redis channel pipeline:events:{companyId} with type=notification, notificationId, notificationType, payload, unreadCount, timestamp. Guarantee DB insert occurs before publish."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/conflicts/route.ts",
+      "purpose": "Paginated conflict listing with filters and response contract for inbox UI.",
+      "sections": [
+        {
+          "label": "route-content",
+          "content": "Implement GET /api/conflicts with auth required. Parse query: resolutionStatus auto_resolved|user_reviewed|user_overridden (optional), matchMethod exact|semantic (optional), normalizedKey (optional), page default 1, limit default 20. Apply tenant scope by session.company_id via withTenant helper. Return 200 { data, total, page, pageSize } with winningObservation and losingObservations projections including sourceDocumentFilename and uploadedAt."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/conflicts/[id]/resolve/route.ts",
+      "purpose": "Manual override endpoint for latest-wins conflict resolution.",
+      "sections": [
+        {
+          "label": "route-content",
+          "content": "Implement POST /api/conflicts/{id}/resolve. Enforce role editor|admin (viewer => 403). Validate body { chosenObservationId: uuid, reason?: string <=500 }. Ensure chosenObservationId exists in conflict observation_ids; else 422. Enforce tenant ownership through withTenant. In single DB transaction: set chosen observation approved; set other approved observations superseded; insert conflict_resolution; update conflict_case resolution_status=user_overridden and winning_observation_id; update derivation_results stale=true where any affected observation in input_observation_ids; insert notification type conflict_resolved payload { conflict_id, chosen_observation_id, resolutionStatus: user_overridden }; insert audit_log. Publish notification after transaction commit. Return 200 { conflictId, resolutionStatus: user_overridden, winningObservationId }. Return 404 for not found/out-of-tenant conflict."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/observations/manual/route.ts",
+      "purpose": "Manual observation creation endpoint with attestation and optional immediate approval path.",
+      "sections": [
+        {
+          "label": "route-content",
+          "content": "Implement POST /api/observations/manual. Enforce role editor|admin (viewer => 403). Validate payload: label required<=200, normalizedKey regex ^[a-z][a-z0-9_]{0,99}$, value required, numericValue required for dataType numeric|percentage, periodStart/periodEnd required for timeBehavior periodic with periodEnd>=periodStart, status only candidate|approved, note<=1000, sourceReference<=500, categoryId if present belongs to session.company_id. In transaction: insert observation provenance_type=manual with company_id and created_by from JWT; insert attestation_record action submitted|approved with note/source_reference and created_by; update observation.attestation_record_id; insert audit_log. After commit, if status approved enqueue semantic-conflict-job payload { observationId, companyId }. Return 201 { id, status, attestationRecordId }. Return 422 { code, field } on validation failure."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/notifications/route.ts",
+      "purpose": "Notification listing endpoint with unread filtering and aggregate unread count.",
+      "sections": [
+        {
+          "label": "route-content",
+          "content": "Implement GET /api/notifications with auth required. Parse query unread=true|false optional, page default 1, limit default 30. Scope rows where company_id=session.company_id and (user_id=session.user_id OR user_id IS NULL). Return 200 { data, total, unreadCount, page, pageSize }."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/notifications/[id]/read/route.ts",
+      "purpose": "Marks one notification as read with ownership checks.",
+      "sections": [
+        {
+          "label": "route-content",
+          "content": "Implement PATCH /api/notifications/{id}/read with no body. Validate ownership and tenant scope: target notification must match company_id and user_id=session.user_id or be company-wide user_id NULL. Update read=true and return 200 { id, read: true }. Return 404 if not found or out of scope."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/conflicts/page.tsx",
+      "purpose": "Conflicts route entrypoint.",
+      "sections": [
+        {
+          "label": "page-content",
+          "content": "Render ConflictInboxPage with server-side initial fetch to GET /api/conflicts and client interactivity for filters/pagination."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/conflicts/ConflictInboxPage.tsx",
+      "purpose": "Paginated conflict inbox UI with filters, empty state, and override integration.",
+      "sections": [
+        {
+          "label": "component-content",
+          "content": "Render filter bar (resolutionStatus: Tous/Non résolus/Résolus, matchMethod select), paginated ConflictCard list, and empty state 'Aucun conflit non résolu'. Fetch conflicts from GET /api/conflicts; apply optimistic updates after override success."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/conflicts/ConflictCard.tsx",
+      "purpose": "Winner/loser side-by-side conflict display and action trigger.",
+      "sections": [
+        {
+          "label": "component-content",
+          "content": "Show normalizedKey badge, match method (Exact/Sémantique), period, winner (green) and loser (red) columns with value/unit/sourceDocumentFilename/uploadedAt. For auto_resolved or user_reviewed show action button on losing column opening ConfirmOverrideDialog; for user_overridden show read-only badge 'Résolu manuellement'."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/conflicts/ConfirmOverrideDialog.tsx",
+      "purpose": "Override confirmation dialog with optional reason.",
+      "sections": [
+        {
+          "label": "component-content",
+          "content": "Use shadcn AlertDialog with text 'Êtes-vous sûr de vouloir remplacer la valeur gagnante actuelle ?'. Include optional reason textarea max 500. On confirm call POST /api/conflicts/{id}/resolve { chosenObservationId, reason }. Optimistically update card; rollback and show Sonner toast on error."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/observations/ManualObservationForm.tsx",
+      "purpose": "Dialog form for manual observations with full validation and API integration.",
+      "sections": [
+        {
+          "label": "component-content",
+          "content": "Implement react-hook-form + Zod fields: label, normalizedKey, value, numericValue, unit, dataType, timeBehavior, periodStart, periodEnd, categoryId, status (default candidate), note, sourceReference. Enforce constraints from §4.12. On submit call POST /api/observations/manual; on success close dialog, append observation optimistically, toast 'Observation ajoutée'; on error show field errors."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/notifications/NotificationBell.tsx",
+      "purpose": "Topbar notification bell with unread badge and live SSE updates.",
+      "sections": [
+        {
+          "label": "component-content",
+          "content": "On mount fetch GET /api/notifications?unread=true for initial unreadCount/list. Subscribe to existing pipeline SSE stream; on notification event increment unreadCount and prepend dropdown item. Open Popover on click showing NotificationItem rows. Add 'Tout marquer comme lu' that PATCHes each unread notification and clears badge."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/notifications/NotificationItem.tsx",
+      "purpose": "Renders notification row with icon/copy/time and click behavior.",
+      "sections": [
+        {
+          "label": "component-content",
+          "content": "Map notification types to icons and FR copy: pipeline_done, conflict_detected, conflict_resolved, report_ready. Show relative timestamp via date-fns (ex: il y a 2 minutes). On click navigate to target page (conflict types -> /conflicts) and mark as read via PATCH /api/notifications/{id}/read."
+        }
+      ]
+    },
+    {
+      "action": "modify",
+      "path": "src/app/api/pipeline/events/route.ts",
+      "purpose": "Extends existing Slice 2 SSE endpoint to emit conflict and notification event types.",
+      "sections": [
+        {
+          "label": "patch-content",
+          "content": "Extend discriminated union of outgoing SSE payloads with conflict_detected and notification events. Keep existing Last-Event-ID replay buffer behavior from Slice 2. Ensure company_id is read exclusively from authenticated session (ignore query parameter)."
+        }
+      ]
+    },
+    {
+      "action": "modify",
+      "path": "src/components/layout/Topbar.tsx",
+      "purpose": "Renders NotificationBell in topbar.",
+      "sections": [
+        {
+          "label": "patch-content",
+          "content": "Insert NotificationBell component in topbar action cluster without changing existing auth/logout controls."
+        }
+      ]
+    },
+    {
+      "action": "modify",
+      "path": "src/components/layout/Sidebar.tsx",
+      "purpose": "Adds unresolved conflict badge tied to conflict_detected updates.",
+      "sections": [
+        {
+          "label": "patch-content",
+          "content": "Add unresolved conflicts count badge initialized from GET /api/conflicts?resolutionStatus=auto_resolved. Increment on conflict_detected SSE and hide when count is zero."
+        }
+      ]
+    },
+    {
+      "action": "modify",
+      "path": "src/app/(app)/observations/page.tsx",
+      "purpose": "Adds manual observation trigger in observations page.",
+      "sections": [
+        {
+          "label": "patch-content",
+          "content": "Add '+ Ajouter manuellement' button that opens ManualObservationForm dialog."
+        }
+      ]
+    }
+  ],
+  "database_migrations": [],
+  "api_endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/conflicts",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": null,
+      "query_params": {
+        "resolutionStatus": "auto_resolved|user_reviewed|user_overridden (optional)",
+        "matchMethod": "exact|semantic (optional)",
+        "normalizedKey": "string (optional)",
+        "page": "number, default 1",
+        "limit": "number, default 20"
+      },
+      "validation_rules": [
+        "Require authenticated session JWT with shape { user_id, company_id, role }.",
+        "Apply tenant scope by session.company_id only.",
+        "resolutionStatus must be one of auto_resolved|user_reviewed|user_overridden when provided.",
+        "matchMethod must be exact|semantic when provided.",
+        "page and limit must be positive integers."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [
+            {
+              "id": "uuid",
+              "normalizedKey": "string",
+              "conflictGroupId": "uuid",
+              "matchMethod": "exact|semantic",
+              "periodStart": "YYYY-MM-DD|null",
+              "periodEnd": "YYYY-MM-DD|null",
+              "resolutionStatus": "auto_resolved|user_reviewed|user_overridden",
+              "autoResolved": true,
+              "winningObservation": {
+                "id": "uuid",
+                "label": "string",
+                "value": "string",
+                "unit": "string|null",
+                "sourceDocumentFilename": "string|null",
+                "uploadedAt": "iso8601|null"
+              },
+              "losingObservations": [
+                {
+                  "id": "uuid",
+                  "label": "string",
+                  "value": "string",
+                  "unit": "string|null",
+                  "sourceDocumentFilename": "string|null",
+                  "uploadedAt": "iso8601|null"
+                }
+              ],
+              "createdAt": "iso8601"
+            }
+          ],
+          "total": 0,
+          "page": 1,
+          "pageSize": 20
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "UNAUTHORIZED",
+          "condition": "No valid session token"
+        },
+        {
+          "status": 422,
+          "code": "INVALID_QUERY",
+          "condition": "Query parameters fail enum/integer validation"
+        }
+      ],
+      "implementation_notes": [
+        "Use tenant transaction helper src/lib/db/rls.ts symbol withTenant to enforce session.company_id scope.",
+        "Use schema symbols from src/lib/db/schema/conflicts.ts: conflictCases, conflictResolutions.",
+        "Join observation sources from src/lib/db/schema/observations.ts symbol observations and src/lib/db/schema/documents.ts symbol documentVersions.",
+        "Filter/serialize enum values defined in drizzle/migrations/0001_foundation.sql and 0005_derivation_conflict.sql.",
+        "Satisfies Slice 4 §4.4 contract with pagination and normalizedKey filter covering semantic groups."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/conflicts/{id}/resolve",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor"],
+      "request_body": {
+        "chosenObservationId": "uuid",
+        "reason": "string|max500|optional"
+      },
+      "path_params": {
+        "id": "uuid conflict_case_id"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "Reject viewer role with 403.",
+        "chosenObservationId must be valid UUID.",
+        "reason max length 500 chars.",
+        "chosenObservationId must exist in conflict_case.observation_ids array or return 422.",
+        "Conflict must be in authenticated tenant via session.company_id.",
+        "Already user_overridden conflict cannot be re-overridden without admin role."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "conflictId": "uuid",
+          "resolutionStatus": "user_overridden",
+          "winningObservationId": "uuid"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "UNAUTHORIZED",
+          "condition": "No valid session token"
+        },
+        {
+          "status": 403,
+          "code": "FORBIDDEN_ROLE",
+          "condition": "Role is viewer or non-admin re-override attempt"
+        },
+        {
+          "status": 404,
+          "code": "CONFLICT_NOT_FOUND",
+          "condition": "Conflict ID not found within tenant scope"
+        },
+        {
+          "status": 422,
+          "code": "OBSERVATION_NOT_IN_CONFLICT",
+          "condition": "chosenObservationId not present in conflict observation_ids"
+        }
+      ],
+      "implementation_notes": [
+        "Run all mutating steps in one DB transaction using src/lib/db/rls.ts symbol withTenant.",
+        "Update statuses in src/lib/db/schema/observations.ts symbol observations using observation_status enum from drizzle/migrations/0001_foundation.sql.",
+        "Insert resolution in src/lib/db/schema/conflicts.ts symbol conflictResolutions and update conflictCases.resolution_status/user_overridden.",
+        "Mark stale derivations in src/lib/db/schema/derivations.ts symbol derivationResults where chosen/loser IDs appear in input_observation_ids.",
+        "Insert audit row through src/lib/db/schema/notifications.ts symbol auditLog (defined in drizzle/migrations/0007_async_audit_rls.sql).",
+        "After commit call src/lib/notifications/publish.ts symbol publishNotification to emit notification event over Redis pub/sub from src/lib/redis.ts client.",
+        "Queue names/timeouts remain defined in src/lib/constants.ts and src/lib/queues.ts from Slice 1; this endpoint does not enqueue new jobs."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/observations/manual",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor"],
+      "request_body": {
+        "label": "string|max200",
+        "normalizedKey": "string regex ^[a-z][a-z0-9_]{0,99}$",
+        "value": "string|required",
+        "numericValue": "number|required for numeric|percentage",
+        "unit": "string|max50|optional",
+        "dataType": "numeric|percentage|text|boolean",
+        "timeBehavior": "periodic|point_in_time|none",
+        "periodStart": "YYYY-MM-DD|required when periodic",
+        "periodEnd": "YYYY-MM-DD|required when periodic and >= periodStart",
+        "categoryId": "uuid|null",
+        "status": "candidate|approved",
+        "note": "string|max1000|optional",
+        "sourceReference": "string|max500|optional"
+      },
+      "path_params": null,
+      "query_params": null,
+      "validation_rules": [
+        "Reject viewer role with 403.",
+        "normalizedKey regex must match ^[a-z][a-z0-9_]{0,99}$.",
+        "status must be candidate or approved only.",
+        "numericValue required when dataType is numeric or percentage.",
+        "For periodic timeBehavior, periodStart and periodEnd are required and periodEnd >= periodStart.",
+        "categoryId if provided must belong to session.company_id.",
+        "note max 1000 and sourceReference max 500."
+      ],
+      "success_response": {
+        "status": 201,
+        "body": {
+          "id": "uuid",
+          "status": "candidate|approved",
+          "attestationRecordId": "uuid"
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "UNAUTHORIZED",
+          "condition": "No valid session token"
+        },
+        {
+          "status": 403,
+          "code": "FORBIDDEN_ROLE",
+          "condition": "Role is viewer"
+        },
+        {
+          "status": 422,
+          "code": "VALIDATION_ERROR",
+          "condition": "Body fails Zod validation or tenant category check"
+        }
+      ],
+      "implementation_notes": [
+        "Insert observation in src/lib/db/schema/observations.ts symbol observations with provenance_type=manual and created_by from JWT claims.",
+        "Insert attestation in src/lib/db/schema/observations.ts symbol attestationRecords using action submitted|approved, then set observations.attestation_record_id.",
+        "If status=approved enqueue semantic-conflict-job via src/lib/queues.ts symbol semanticConflictQueue with timeout 60000 ms (global queue catalog in src/lib/constants.ts).",
+        "Use UUIDv7 generator introduced in Slice 1 for new IDs.",
+        "Insert audit entry into src/lib/db/schema/notifications.ts symbol auditLog.",
+        "Tenant enforcement must use src/lib/db/rls.ts symbol withTenant and JWT shape from src/lib/auth.ts callbacks / src/types/auth.ts augmentation."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/notifications",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": null,
+      "query_params": {
+        "unread": "true|false optional",
+        "page": "number, default 1",
+        "limit": "number, default 30"
+      },
+      "validation_rules": [
+        "Require authenticated session.",
+        "Filter rows to company_id=session.company_id.",
+        "Visibility rule: user_id=session.user_id OR user_id IS NULL.",
+        "page and limit must be positive integers.",
+        "unread if provided must be boolean-like string true|false."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [
+            {
+              "id": "uuid",
+              "type": "conflict_detected|conflict_resolved|pipeline_done|report_ready",
+              "payload": {},
+              "read": false,
+              "createdAt": "iso8601"
+            }
+          ],
+          "total": 0,
+          "unreadCount": 0,
+          "page": 1,
+          "pageSize": 30
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "UNAUTHORIZED",
+          "condition": "No valid session token"
+        },
+        {
+          "status": 422,
+          "code": "INVALID_QUERY",
+          "condition": "Invalid unread/page/limit query values"
+        }
+      ],
+      "implementation_notes": [
+        "Read from src/lib/db/schema/notifications.ts symbol notifications.",
+        "Use src/lib/db/rls.ts symbol withTenant to ensure tenant isolation.",
+        "Notification type enum must match migration contract in drizzle/migrations/0001_foundation.sql (enum notification_type) and notification table shape in drizzle/migrations/0006_report_chat_notification.sql.",
+        "Compute unreadCount with same ownership predicate used by list query.",
+        "Endpoint data backs src/components/notifications/NotificationBell.tsx initial state."
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/notifications/{id}/read",
+      "auth_required": true,
+      "roles_allowed": ["admin", "editor", "viewer"],
+      "request_body": null,
+      "path_params": {
+        "id": "uuid notification_id"
+      },
+      "query_params": null,
+      "validation_rules": [
+        "Require authenticated session.",
+        "No body required.",
+        "Notification must match tenant company_id and (user_id=session.user_id OR user_id IS NULL)."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "id": "uuid",
+          "read": true
+        }
+      },
+      "error_responses": [
+        {
+          "status": 401,
+          "code": "UNAUTHORIZED",
+          "condition": "No valid session token"
+        },
+        {
+          "status": 404,
+          "code": "NOTIFICATION_NOT_FOUND",
+          "condition": "Notification not found in accessible scope"
+        }
+      ],
+      "implementation_notes": [
+        "Update src/lib/db/schema/notifications.ts symbol notifications.read in tenant transaction via withTenant.",
+        "Used by NotificationItem and NotificationBell bulk mark-read interaction.",
+        "Preserves RLS ownership contract from Slice 1/3 infrastructure."
+      ]
+    }
+  ],
+  "background_jobs": [
+    {
+      "queue": "semantic-conflict-job",
+      "job_name": "processSemanticConflictJob",
+      "trigger": "Enqueued when an observation transitions to approved (document review approval in Slice 3 or manual observation creation in Slice 4 with status=approved).",
+      "payload_schema": {
+        "observationId": "uuid",
+        "companyId": "uuid",
+        "reason": "string|optional"
+      },
+      "timeout_ms": 60000,
+      "retry_attempts": 3,
+      "steps": [
+        {
+          "step": 1,
+          "label": "Load and gate approved source observation",
+          "detail": "SELECT obs_a by observationId and companyId; if not found or obs_a.status != approved, exit job successfully without side effects."
+        },
+        {
+          "step": 2,
+          "label": "Find candidate near-duplicates",
+          "detail": "Run SQL: SELECT obs_b.* FROM observations obs_b WHERE obs_b.company_id = $companyId AND obs_b.id != $observationId AND obs_b.status = 'approved' AND (similarity(obs_b.normalized_key, $obs_a_normalized_key) >= 0.5 OR obs_b.unit = $obs_a_unit) AND obs_b.period_start <= $obs_a_period_end AND obs_b.period_end >= $obs_a_period_start. Requires pg_trgm index on normalized_key from prior slices."
+        },
+        {
+          "step": 3,
+          "label": "Per-candidate equivalence classification",
+          "detail": "If normalized keys are exact match, classify as SAME_KEY with match_method=exact and skip LLM. Else compute canonical cache key from sorted key pair. Query key_equivalence_cache by (company_id, key_a, key_b). On cache miss call Grok classifier with key/label/unit prompt and parse first token SAME_KEY or DIFFERENT_KEY. Insert cache row with ON CONFLICT(company_id,key_a,key_b) DO NOTHING."
+        },
+        {
+          "step": 4,
+          "label": "Confirm actual value conflict",
+          "detail": "For SAME_KEY or exact matches normalize comparable numeric values; if values are equal within tolerance 0.1%, skip pair (not a conflict)."
+        },
+        {
+          "step": 5,
+          "label": "Apply latest-wins and upsert conflict case",
+          "detail": "Compute winner/loser using latestWins: document provenance timestamp=document_version.uploaded_at; manual provenance timestamp=attestation_record.created_at; tie=>obs_a winner. Insert conflict_case with normalized_key, conflict_group_id (existing from candidate group or new UUIDv7), match_method exact|semantic, observation_ids [obs_a.id,obs_b.id], winning_observation_id=winner.id, auto_resolved=true, resolution_status=auto_resolved. Use idempotent pair uniqueness guard to skip duplicate insert created by concurrent workers."
+        },
+        {
+          "step": 6,
+          "label": "Supersede loser and stale derivations",
+          "detail": "UPDATE observations SET status='superseded' WHERE id=$loser_id. UPDATE derivation_results SET stale=true WHERE $loser_id = ANY(input_observation_ids)."
+        },
+        {
+          "step": 7,
+          "label": "Emit notifications and SSE events",
+          "detail": "Insert notification row type conflict_detected payload { conflictId, normalizedKey }. Call publishNotification(companyId, notification) which publishes type=notification event to Redis channel pipeline:events:{companyId} with unreadCount. Publish additional pipeline SSE event type=conflict_detected with conflictId/normalizedKey/matchMethod/timestamp."
+        },
+        {
+          "step": 8,
+          "label": "Completion semantics",
+          "detail": "No pipeline_run status update is performed because semantic-conflict-job is a side-effect job, not a core pipeline stage."
+        }
+      ],
+      "error_handling": [
+        "BullMQ retries: 3 attempts with exponential backoff 2s, 4s, 8s.",
+        "Grok classifier call timeout: 30000 ms.",
+        "If Grok call fails repeatedly, log error and continue; do not fail whole job.",
+        "Malformed classifier output (no SAME_KEY/DIFFERENT_KEY token): log parse error, do not write cache entry, treat as DIFFERENT_KEY.",
+        "Conflict case insert races are handled via ON CONFLICT/duplicate guard; duplicate pairs are skipped silently."
+      ]
+    }
+  ],
+  "types_and_interfaces": [
+    {
+      "name": "JwtClaims",
+      "file": "src/types/auth.ts",
+      "definition": "export type JwtClaims = { user_id: string; company_id: string; role: 'admin' | 'editor' | 'viewer' };"
+    },
+    {
+      "name": "ResolveConflictRequest",
+      "file": "src/app/api/conflicts/[id]/resolve/route.ts",
+      "definition": "export interface ResolveConflictRequest { chosenObservationId: string; reason?: string; }"
+    },
+    {
+      "name": "ResolveConflictResponse",
+      "file": "src/app/api/conflicts/[id]/resolve/route.ts",
+      "definition": "export interface ResolveConflictResponse { conflictId: string; resolutionStatus: 'user_overridden'; winningObservationId: string; }"
+    },
+    {
+      "name": "ManualObservationRequest",
+      "file": "src/app/api/observations/manual/route.ts",
+      "definition": "export interface ManualObservationRequest { label: string; normalizedKey: string; value: string; numericValue?: number; unit?: string; dataType: 'numeric' | 'percentage' | 'text' | 'boolean'; timeBehavior: 'periodic' | 'point_in_time' | 'none'; periodStart?: string; periodEnd?: string; categoryId?: string | null; status: 'candidate' | 'approved'; note?: string; sourceReference?: string; }"
+    },
+    {
+      "name": "ManualObservationResponse",
+      "file": "src/app/api/observations/manual/route.ts",
+      "definition": "export interface ManualObservationResponse { id: string; status: 'candidate' | 'approved'; attestationRecordId: string; }"
+    },
+    {
+      "name": "ConflictDetectedEvent",
+      "file": "src/app/api/pipeline/events/route.ts",
+      "definition": "export interface ConflictDetectedEvent { type: 'conflict_detected'; conflictId: string; normalizedKey: string; matchMethod: 'exact' | 'semantic'; timestamp: string; }"
+    },
+    {
+      "name": "NotificationEvent",
+      "file": "src/app/api/pipeline/events/route.ts",
+      "definition": "export interface NotificationEvent { type: 'notification'; notificationId: string; notificationType: 'conflict_detected' | 'conflict_resolved' | 'pipeline_done' | 'report_ready'; payload: Record<string, unknown>; unreadCount: number; timestamp: string; }"
+    },
+    {
+      "name": "SemanticConflictJobPayload",
+      "file": "workers/pipeline/jobs/semanticConflict.ts",
+      "definition": "export interface SemanticConflictJobPayload { observationId: string; companyId: string; reason?: string; }"
+    },
+    {
+      "name": "LatestWinsResult",
+      "file": "src/lib/conflicts/applyLatestWins.ts",
+      "definition": "export interface LatestWinsResult { winner: { id: string }; loser: { id: string }; }"
+    }
+  ],
+  "constants": [
+    {
+      "name": "LOW_CONFIDENCE_THRESHOLD",
+      "file": "src/lib/constants.ts",
+      "value": "0.70",
+      "purpose": "Global extraction low-confidence threshold retained from prior slices; included as cross-slice runtime context."
+    },
+    {
+      "name": "QUEUE_TIMEOUTS_MS",
+      "file": "src/lib/constants.ts",
+      "value": "{ ocr-job: 180000, embedding-job: 120000, extraction-job: 300000, semantic-conflict-job: 60000, render-pdf-job: 90000, pending-obs-timeout: 30000 }",
+      "purpose": "Unified BullMQ timeout catalog used by queue registration and job processors."
+    },
+    {
+      "name": "SEMANTIC_CONFLICT_RETRY_POLICY",
+      "file": "workers/pipeline/jobs/semanticConflict.ts",
+      "value": "{ attempts: 3, backoffMs: [2000, 4000, 8000], grokTimeoutMs: 30000 }",
+      "purpose": "Reliability policy for semantic conflict classifier job."
+    },
+    {
+      "name": "PIPELINE_EVENTS_CHANNEL_PREFIX",
+      "file": "src/lib/constants.ts",
+      "value": "pipeline:events:",
+      "purpose": "Redis pub/sub prefix used by publishPipelineEvent and publishNotification for SSE fan-out."
+    },
+    {
+      "name": "EQUAL_VALUE_TOLERANCE_RATIO",
+      "file": "workers/pipeline/jobs/semanticConflict.ts",
+      "value": "0.001",
+      "purpose": "Conflict suppression threshold (0.1% tolerance) when numeric values are effectively equal."
+    }
+  ],
+  "sse_events": [
+    {
+      "event_name": "conflict_detected",
+      "payload": {
+        "type": "conflict_detected",
+        "conflictId": "uuid",
+        "normalizedKey": "string",
+        "matchMethod": "exact|semantic",
+        "timestamp": "iso8601"
+      },
+      "emitted_by": "workers/pipeline/jobs/semanticConflict.ts via publishPipelineEvent",
+      "consumed_by": "src/app/api/pipeline/events/route.ts then UI consumers src/components/conflicts/ConflictInboxPage.tsx and src/components/layout/Sidebar.tsx"
+    },
+    {
+      "event_name": "notification",
+      "payload": {
+        "type": "notification",
+        "notificationId": "uuid",
+        "notificationType": "conflict_detected|conflict_resolved|pipeline_done|report_ready",
+        "payload": {},
+        "unreadCount": 0,
+        "timestamp": "iso8601"
+      },
+      "emitted_by": "src/lib/notifications/publish.ts",
+      "consumed_by": "src/app/api/pipeline/events/route.ts then src/components/notifications/NotificationBell.tsx"
+    }
+  ],
+  "acceptance_criteria": [
+    "Approving two observations with same normalized_key and overlapping period creates ConflictCase with auto_resolved=true and later timestamp winner.",
+    "POST /api/conflicts/{id}/resolve with valid chosenObservationId returns 200, creates ConflictResolution, supersedes loser, and marks affected DerivationResult rows stale.",
+    "POST /api/conflicts/{id}/resolve with chosenObservationId not in conflict observation_ids returns 422.",
+    "Viewer role on POST /api/conflicts/{id}/resolve returns 403.",
+    "POST /api/observations/manual valid candidate payload returns 201 and persists Observation + AttestationRecord.",
+    "POST /api/observations/manual with status=approved enqueues semantic-conflict-job.",
+    "notification SSE event is delivered within 2 seconds of Notification insert.",
+    "Notification bell badge increments on notification SSE without page reload.",
+    "PATCH /api/notifications/{id}/read returns 200 { read: true } and later unread query excludes it.",
+    "KeyEquivalenceCache prevents second Grok call for same key pair (verified by mock call counter).",
+    "TypeScript and test gates pass: tsc --noEmit and vitest run (plus relevant Playwright conflict/notification/manual flows)."
+  ],
+  "known_spec_deviations": [
+    {
+      "item": "Manual observation endpoint path",
+      "reason": "Spec §16 lists POST /api/observations; Slice 4 standardizes POST /api/observations/manual to avoid collision with future GET /api/observations listing and to clearly distinguish manual creation from pipeline-created observations."
+    }
+  ],
+  "implementation_order": [
+    "Add conflict utilities: cache key generation, latest-wins, classifier integration, candidate query module.",
+    "Implement semantic-conflict-job processor in pipeline worker with idempotency, cache writes, conflict insert, stale derivation marking, and event publication.",
+    "Implement notification publisher utility that persists row and publishes notification SSE event with unread count.",
+    "Implement conflicts APIs: GET /api/conflicts and POST /api/conflicts/{id}/resolve with role/tenant enforcement and transactional writes.",
+    "Implement manual observation API POST /api/observations/manual with Zod validation, attestation insert, audit log, and conditional semantic job enqueue.",
+    "Implement notifications APIs: GET /api/notifications and PATCH /api/notifications/{id}/read with ownership rules.",
+    "Extend existing pipeline SSE route to pass through conflict_detected and notification event payloads.",
+    "Create conflicts UI route/components including override dialog and optimistic updates.",
+    "Add manual observation form dialog and integrate trigger into observations page.",
+    "Add notification bell + items into topbar and sidebar unresolved conflict badge behavior.",
+    "Run unit/integration/E2E tests focused on conflict detection, override, manual observation, and live notification updates."
+  ]
+}

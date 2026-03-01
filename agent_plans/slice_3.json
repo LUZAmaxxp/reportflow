@@ -1,0 +1,788 @@
+{
+  "slice": 3,
+  "title": "Extraction → Review Queue → Document Detail Split-View + Read-Only Categories Endpoint",
+  "description": "Implements the extraction stage after embeddings are ready: hybrid retrieval (pgvector dense + pg_trgm sparse with RRF), Grok structured extraction, hallucination guard, candidate observation creation, exact-match conflict flagging, observation edit/status APIs, review queue UI, split-view document detail with bbox highlighting, company-wide observations browser, and read-only categories endpoint.",
+  "depends_on_slices": [2],
+  "env_vars_required": [
+    { "key": "DATABASE_URL", "description": "PostgreSQL 16 connection string (with pgvector + pg_trgm enabled).", "example": "postgresql://user:pass@localhost:5432/reportflow" },
+    { "key": "REDIS_URL", "description": "Redis 7 URL for BullMQ and Redis pub/sub SSE fan-out.", "example": "redis://localhost:6379" },
+    { "key": "R2_ACCOUNT_ID", "description": "Cloudflare R2 account identifier for object storage access.", "example": "a1b2c3d4e5f6" },
+    { "key": "R2_ACCESS_KEY_ID", "description": "R2 access key ID for S3-compatible API.", "example": "R2AKIAREPORTFLOW001" },
+    { "key": "R2_SECRET_ACCESS_KEY", "description": "R2 secret for S3-compatible API.", "example": "super-secret" },
+    { "key": "R2_BUCKET_NAME", "description": "R2 bucket name where originals/pages are stored.", "example": "reportflow-dev" },
+    { "key": "XAI_API_KEY", "description": "xAI Grok API key for extraction/classification calls.", "example": "xai-rf-demo-key-001" },
+    { "key": "OPENAI_API_KEY", "description": "OpenAI key for text-embedding-3-small query embedding in hybrid retrieval.", "example": "sk-reportflow-openai-demo-key" },
+    { "key": "PADDLEOCR_TOKEN", "description": "PaddleOCR-VL token (upstream dependency from prior pipeline stages).", "example": "paddle-reportflow-token-001" },
+    { "key": "PADDLEOCR_API_URL", "description": "PaddleOCR-VL endpoint (upstream dependency from prior pipeline stages).", "example": "https://aip.baidubce.com/rpc/2.0/ocr/v1/general" },
+    { "key": "MEM0_API_KEY", "description": "mem0 API key (cross-cutting project dependency, not directly used in Slice 3 code paths).", "example": "m0-reportflow-memory-key" },
+    { "key": "NEXTAUTH_URL", "description": "Auth.js base URL for JWT session handling.", "example": "http://localhost:3000" },
+    { "key": "NEXTAUTH_SECRET", "description": "Auth.js JWT/session secret.", "example": "base64-32-byte-secret" },
+    { "key": "AUTH_TRUST_HOST", "description": "Auth.js reverse proxy trust toggle.", "example": "true" },
+    { "key": "PDF_WORKER_URL", "description": "PDF worker service URL (cross-cutting deployment context).", "example": "http://localhost:3001" },
+    { "key": "NEXT_PUBLIC_APP_URL", "description": "Public app URL for client-side links and callbacks.", "example": "http://localhost:3000" }
+  ],
+  "packages_to_install": [
+    { "name": "zod", "version": "^3.23.0", "dev": false },
+    { "name": "react-hook-form", "version": "^7.53.0", "dev": false },
+    { "name": "@hookform/resolvers", "version": "^3.9.0", "dev": false },
+    { "name": "framer-motion", "version": "^11.0.0", "dev": false },
+    { "name": "bullmq", "version": "^5.0.0", "dev": false },
+    { "name": "ioredis", "version": "^5.4.0", "dev": false },
+    { "name": "drizzle-orm", "version": "^0.36.0", "dev": false },
+    { "name": "pg", "version": "^8.13.0", "dev": false },
+    { "name": "uuidv7", "version": "^1.0.2", "dev": false },
+    { "name": "vitest", "version": "^2.1.0", "dev": true },
+    { "name": "@testcontainers/postgresql", "version": "^11.0.0", "dev": true },
+    { "name": "playwright", "version": "^1.50.0", "dev": true }
+  ],
+  "files": [
+    {
+      "action": "create",
+      "path": "src/app/(app)/documents/[id]/page.tsx",
+      "purpose": "Document detail route hosting split-view (page image + observation panel).",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Server component route for /documents/[id].\n- Reads route param id, calls auth() and redirects unauthenticated users to /login.\n- Fetches GET /api/documents/{id} and GET /api/documents/{id}/observations?status=candidate&page=1&limit=50 in parallel using internal API helpers with cookie forwarding.\n- Normalizes API envelope into typed props { document, observations, pagination } and passes them to DocumentSplitView.\n- Handles 404 with notFound(), handles 401/403 with FR error state, and renders fallback empty state when no candidate observations exist."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/documents/[id]/review/page.tsx",
+      "purpose": "Review queue page with tabbed status views and action controls.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Server component route for /documents/[id]/review.\n- Parses search params tab and page with defaults tab=candidate and page=1; allowed tabs are candidate|approved|rejected.\n- Loads document metadata and observation page for selected tab via GET /api/documents/{id}/observations with tenant-scoped auth cookie context.\n- Computes tab counters for Candidat, Approuvé, Rejeté, then renders ReviewQueueTabs with initial rows, current tab, pagination, and document id.\n- Returns 404 when document is not visible under tenant scope and shows FR fallback message for empty tab results."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/(app)/observations/page.tsx",
+      "purpose": "Company-wide observations list with filter sidebar and pagination.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Server component route for /observations with URL-driven filters.\n- Parses and validates status, normalizedKey, categoryId, q, periodStart, periodEnd, page, limit, and sort=confidence_score:desc.\n- Fetches GET /api/observations and GET /api/categories in parallel, preserving current query state for deep-linkable navigation.\n- Renders ObservationFilterPanel (left) and paginated ObservationCard grid (right) with total/page metadata.\n- Includes FR empty state \"Aucune observation trouvée\" and reset-filters action that clears query params."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/documents/[id]/observations/route.ts",
+      "purpose": "List observations for one document version/document.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Route handler implements GET /api/documents/{id}/observations.\n- Requires auth(); returns 401 for missing session and validates path/query params (status optional, page>=1, limit 1..100).\n- Uses withTenant(session.company_id) and joins observation + document_version/document to ensure the document belongs to tenant scope.\n- Applies optional status filter and paginates with total count + ordered page result set.\n- Returns envelope { data, total, page, pageSize } with API field mapping to camelCase; returns 404 when document id is not found in tenant scope and 422 on invalid query params."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/observations/route.ts",
+      "purpose": "Company-wide paginated observations browser API.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Route handler implements GET /api/observations for company-wide browsing.\n- Requires auth() and wraps all queries with withTenant(session.company_id).\n- Supports filters: status, normalizedKey exact match, categoryId, q over label/normalized_key with ILIKE, and period overlap (period_start <= periodEnd && period_end >= periodStart).\n- Enforces pagination defaults page=1, limit=20, and sort=confidence_score:desc only.\n- Returns paginated envelope with mapped observation DTOs; returns 422 on invalid filter combinations and 401 when unauthenticated."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/observations/[id]/route.ts",
+      "purpose": "Single observation fetch + editable field patch endpoint.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Merged route handler implements GET and PATCH /api/observations/{id}.\n- GET: requires auth and withTenant scope, loads full observation record plus evidence block summaries { id, pageNumber, textContent, bbox, ocrConfidence }, maps to detail response shape, and returns 404 outside tenant scope.\n- PATCH: role-gated to editor|admin (viewer -> 403), validates partial payload with Zod (normalizedKey regex, date ordering, category ownership), supports empty-object no-op 200.\n- Persists only provided editable fields: label, normalizedKey, value, unit, periodStart, periodEnd, categoryId.\n- If normalizedKey changes on an approved observation, enqueues semantic-conflict-job with reason=key_changed using Slice 1 queue registry."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/observations/[id]/status/route.ts",
+      "purpose": "Observation status transition API.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Route handler implements PATCH /api/observations/{id}/status.\n- Requires auth and editor|admin role; viewer is rejected with 403.\n- Validates body { status: approved|rejected|candidate }, opens transaction, locks row via SELECT FOR UPDATE, and checks isValidTransition(current, requested, role).\n- On invalid transition returns 422 with payload { code: invalid_transition, from, to }; on missing tenant-scoped row returns 404.\n- On approved or rejected inserts attestation_record and audit_log diff; on approved additionally enqueues semantic-conflict-job { observationId, companyId } and publishes SSE event observation_approved.\n- Returns { id, status, updatedAt } on success."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/app/api/categories/route.ts",
+      "purpose": "Read-only category tree endpoint needed by extraction result review/editing.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Route handler implements GET /api/categories (read-only).\n- Requires auth for viewer|editor|admin.\n- Executes tenant-scoped category query with ordering path ASC, sort_order ASC.\n- Maps DB columns to API fields { id, name, description, parentCategoryId, path, sortOrder }.\n- Returns { data: [...] } and 401 when session is missing."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/documents/DocumentSplitView.tsx",
+      "purpose": "Client orchestration component for split-view interactions.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Client component orchestrates split-view interactions for one document.\n- Owns state: activePage, activeObservationId, activeBbox, and per-page observation subset.\n- Renders two-column layout: PageImageViewer (left) and ObservationListPanel (right).\n- Handles row hover/click events from ObservationListPanel to set active bbox; clears bbox when page changes or selection is removed.\n- Provides prev/next page controls bounded by pageCount and keeps URL/query state synchronized when needed."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/documents/PageImageViewer.tsx",
+      "purpose": "Displays page PNG and overlay for active bbox.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Client component responsible for page image rendering and overlay mount point.\n- On documentId/pageNumber change, fetches GET /api/documents/{id}/pages/{pageNumber} and stores signed image URL/loading/error state.\n- Renders image container with object-contain sizing and fixed aspect-safe viewport.\n- Mounts BboxOverlay as absolutely-positioned SVG above the image and passes activeBbox coordinates in ratio space.\n- Shows FR loading and error placeholders when page image fetch fails or is pending."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/documents/BboxOverlay.tsx",
+      "purpose": "SVG overlay that highlights one evidence rectangle.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Presentational SVG overlay component for evidence highlighting.\n- Accepts activeBbox: { x1, y1, x2, y2 } | null using normalized 0..1 coordinates.\n- Renders SVG with viewBox=\"0 0 1 1\" and one rect computed from bbox corners.\n- Applies visual style fill rgba(59,130,246,0.2) and stroke rgba(59,130,246,0.8).\n- Uses Framer Motion opacity transitions so highlight fades in/out when activeBbox changes."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/observations/ObservationListPanel.tsx",
+      "purpose": "Document-scoped observation list used by split-view.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Client list component for document-scoped observations.\n- Receives observations for current page and renders scrollable rows with normalizedKey, value, unit, confidenceScore, and status badge.\n- Exposes callbacks onHoverObservation and onSelectObservation that emit observation id + bbox payload to parent.\n- Highlights active row and supports keyboard accessibility for selection.\n- Integrates with parent pagination controls by reacting to page changes and resetting stale selection."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/observations/ObservationReviewRow.tsx",
+      "purpose": "Single review-row component with status and actions.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Reusable row component for review queue tabs.\n- Displays label, normalizedKey, value, unit, period range, confidence badge, and source page reference.\n- Candidate tab actions: Approuver, Rejeter, Modifier; Rejeté tab action: Reconsidérer; Approuvé tab remains read-only for status with Modifier enabled.\n- Triggers PATCH /api/observations/{id}/status or PATCH /api/observations/{id} through parent callbacks.\n- Supports optimistic tab migration with rollback + toast on request failure."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/observations/ObservationEditForm.tsx",
+      "purpose": "Inline/dialog form for observation field edits.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Form component used for inline/dialog observation edits.\n- Built with react-hook-form and zodResolver, covering label, normalizedKey, value, unit, periodStart, periodEnd, and categoryId.\n- Enforces normalizedKey regex ^[a-z][a-z0-9_]{0,99}$ and periodEnd >= periodStart before submit.\n- Loads category options from GET /api/categories data passed by parent and supports null category assignment.\n- Submits PATCH /api/observations/{id}, handles API validation errors, and returns updated row data to caller."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/observations/ReviewQueueTabs.tsx",
+      "purpose": "Tabbed status organizer for review queue.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Container component for review queue tab UX.\n- Uses shadcn Tabs with values candidate, approved, rejected and FR labels Candidat, Approuvé, Rejeté.\n- Displays count badges per tab and tab-specific pagination controls.\n- Renders ObservationReviewRow list for active tab and wires optimistic handlers for status transitions and edits.\n- Syncs active tab/page to URL search params so reload and sharing preserve current view."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/observations/ObservationCard.tsx",
+      "purpose": "Card presentation for list page.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Card component for company-wide observation browsing.\n- Displays core fields: label, normalizedKey, value/unit, status badge, period range, and source document label.\n- Uses compact layout suitable for paginated grid rendering.\n- Exposes click target to open detail/review route for the related document observation context."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/components/observations/ObservationFilterPanel.tsx",
+      "purpose": "Filter UI for observations list page.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Filter sidebar component for /observations list page.\n- Provides controls for status multi-select, category tree select, normalizedKey exact input, period range, and free-text q.\n- Initializes values from URL query params and writes changes back to URL for shareable links/back-button behavior.\n- Emits normalized filter object to parent fetch layer and supports clear/reset action.\n- Uses categories payload from GET /api/categories without extra client fetch roundtrip."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/observations/stateMachine.ts",
+      "purpose": "Single source of truth for observation transition validity.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Defines observation status transition rules as single source of truth.\n- Exports ObservationStatus and TransitionRole types plus isValidTransition(from, to, role).\n- Allows only: candidate->approved, candidate->rejected, rejected->candidate, superseded->approved (editor/admin/system), approved->invalidated (system only).\n- Returns false for all other combinations, including any outgoing transition from invalidated.\n- Shared by API routes and transactional transition helper to avoid rule drift."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/observations/transitions.ts",
+      "purpose": "Transactional transition application helpers.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Transactional helper implementing side-effect-safe status transitions.\n- Exports applyTransition(db, obsId, toStatus, userId, role, companyId) and runs inside a single DB transaction.\n- Locks target observation row with SELECT FOR UPDATE, validates transition with isValidTransition, and persists new status + updated_at.\n- Writes attestation_record and audit_log entries where required by transition semantics.\n- On approved transition, enqueues semantic-conflict-job and publishes observation_approved via existing pipeline pub/sub helper before commit."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/extraction/hybridRetrieval.ts",
+      "purpose": "Dense+sparse retrieval with RRF fusion.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Extraction utility implementing hybrid retrieval for one document version.\n- Generates query embedding from fixed ESG query string, then runs dense pgvector cosine top-200 over embedded evidence blocks with SET LOCAL hnsw.ef_search=100.\n- Runs sparse pg_trgm similarity top-200 using bilingual ESG keyword bag over text_content.\n- Fuses ranks with RRF formula 0.6*(1/(60+denseRank)) + 0.4*(1/(60+sparseRank)), assigning missing rank as N+1.\n- Returns top 150 fused blocks with page/text metadata required by Grok prompt builder."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/extraction/grokExtract.ts",
+      "purpose": "xAI Grok extraction call wrapper.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Wrapper around xAI extraction inference call.\n- Builds system+user prompt with document context (filename/category/client), soft key hints, and retrieved evidence block list.\n- Calls grok-4-1-fast-reasoning in JSON mode with timeout=120000 ms.\n- Retries once only for schema-invalid response; skips retry when elapsed>=240000 ms to preserve 300000 ms job timeout budget.\n- Returns raw JSON payload and structured error metadata for parser/failure handling."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/extraction/parseExtraction.ts",
+      "purpose": "Zod schema validation and parser for Grok output.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Defines Zod schema and parser for Grok extraction response.\n- Exposes ParsedObservation type and parseExtractionResponse(raw) that returns validated ParsedObservation[].\n- Validates label length<=200, normalized_key regex ^[a-z][a-z0-9_]{0,99}$, value presence, enum fields, and confidence_score range 0..1.\n- Enforces evidence_block_ids as non-empty UUID array and period_end>=period_start when both provided.\n- Adds cross-field guard: data_type numeric or percentage requires numeric_value to be non-null."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/extraction/hallucinationGuard.ts",
+      "purpose": "Rejects observations referencing unknown evidence blocks.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Validation utility that prevents unsupported evidence references.\n- Exports validateBlockIds(observations, knownBlockIdsSet).\n- Keeps only observations where every evidence_block_id exists in known block ids for the current document version.\n- Returns filtered observation array plus counters/metadata for skipped observations when needed by caller.\n- Emits structured warning logs with observation key/id context for discarded hallucinated references."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "src/lib/extraction/exactConflict.ts",
+      "purpose": "Exact-match conflict case creation against approved observations.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Exact-match conflict detection helper run after candidate insert.\n- For each new observation, queries approved observations in same company with identical normalized_key and overlapping period window.\n- Inserts conflict_case rows with match_method='exact', conflict_group_id generated, auto_resolved=false, winning_observation_id=null, and observation_ids [new, matched].\n- Leaves observation statuses unchanged; this is flag-only conflict creation for later Slice 4 semantic resolution workflows."
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "path": "workers/pipeline/jobs/extraction.ts",
+      "purpose": "BullMQ extraction job processor.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "BullMQ processor for extraction-job implementing the full Slice 3 pipeline stage.\n- Performs status gate checks and crash-recovery re-entry logic, then creates pipeline_run(status='running') and sets document_version.pipeline_status='extracting'.\n- Executes FR-18 classifier, hybrid retrieval, low-block guard, Grok extraction call, schema parse/validation, and hallucination filtering.\n- Inserts candidate observations, creates exact-match conflict_case rows, and records created/skipped counts.\n- Finalizes with pipeline_run.status='done', document_version.pipeline_status='review_ready', publishes pipeline_stage_changed + extraction_complete events, and inserts notification type='pipeline_done'.\n- Handles failures/timeouts with DLQ-compatible path and consistent failed status/error message writes."
+        }
+      ]
+    }
+    ,
+    {
+      "action": "create",
+      "path": "src/lib/pipeline/events.ts",
+      "purpose": "Barrel export for all pipeline SSE event type definitions.",
+      "sections": [
+        {
+          "label": "complete_file",
+          "content": "Barrel export module defining the PipelineEvent union type and all individual pipeline SSE event interfaces.\n- Exports PipelineEventObservationApproved with fields type, observationId, documentId, companyId, timestamp.\n- Exports PipelineEventStageChanged with fields type, documentVersionId, documentId, pipelineStatus, timestamp.\n- Exports PipelineEventExtractionComplete with fields type, documentVersionId, documentId, observationCount, warning, timestamp.\n- Exports PipelineEvent as the discriminated union of all event interfaces, keyed on the type field.\n- Used by SSE route handler, pub/sub publisher, and client-side PipelineSSEProvider for type-safe event consumption."
+        }
+      ]
+    }
+  ],
+  "database_migrations": [],
+  "api_endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/documents/{id}/observations",
+      "auth_required": true,
+      "roles_allowed": ["viewer", "editor", "admin"],
+      "request_body": null,
+      "path_params": { "id": "uuid (document id)" },
+      "query_params": {
+        "status": "candidate|approved|rejected (optional)",
+        "page": "integer >= 1 (default 1)",
+        "limit": "integer 1..100 (default 50)"
+      },
+      "validation_rules": [
+        "Authenticated session required.",
+        "Tenant scoping enforced with src/lib/db/rls.ts::withTenant.",
+        "status, if provided, must be one of candidate|approved|rejected.",
+        "page and limit must be positive integers."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [
+            {
+              "id": "uuid",
+              "label": "string",
+              "normalizedKey": "string",
+              "value": "string",
+              "unit": "string|null",
+              "dataType": "numeric|percentage|text|boolean",
+              "timeBehavior": "periodic|point_in_time|none",
+              "periodStart": "YYYY-MM-DD|null",
+              "periodEnd": "YYYY-MM-DD|null",
+              "status": "candidate|approved|rejected|superseded|invalidated",
+              "confidenceScore": 0.91,
+              "categoryId": "uuid|null",
+              "evidenceBlockIds": ["uuid"],
+              "createdAt": "iso8601"
+            }
+          ],
+          "total": 14,
+          "page": 1,
+          "pageSize": 50
+        }
+      },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No valid Auth.js session." },
+        { "status": 404, "code": "document_not_found", "condition": "Document missing or outside tenant scope." },
+        { "status": 422, "code": "invalid_query", "condition": "Invalid page/limit/status values." }
+      ],
+      "implementation_notes": [
+        "Use src/lib/auth.ts::auth to obtain JWT claims shape { user_id, company_id, role } from Slice 1.",
+        "Wrap DB reads with src/lib/db/rls.ts::withTenant from Slice 1.",
+        "Use tables exported by src/lib/db/schema/observations.ts and src/lib/db/schema/documents.ts from Slice 1.",
+        "Align envelope format with Slice 2 list endpoints in src/app/api/documents/route.ts."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/observations",
+      "auth_required": true,
+      "roles_allowed": ["viewer", "editor", "admin"],
+      "request_body": null,
+      "path_params": null,
+      "query_params": {
+        "status": "candidate|approved|rejected|superseded (optional)",
+        "normalizedKey": "exact key string (optional)",
+        "categoryId": "uuid (optional)",
+        "q": "free text ILIKE search on label and normalized_key (optional)",
+        "periodStart": "YYYY-MM-DD (optional)",
+        "periodEnd": "YYYY-MM-DD (optional)",
+        "page": "integer >= 1 (default 1)",
+        "limit": "integer 1..100 (default 20)",
+        "sort": "confidence_score:desc (default)"
+      },
+      "validation_rules": [
+        "Authenticated session required.",
+        "Tenant isolation via withTenant.",
+        "If both periodStart and periodEnd provided, periodEnd must be >= periodStart.",
+        "categoryId must be UUID when provided.",
+        "sort must be supported value confidence_score:desc."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [],
+          "total": 0,
+          "page": 1,
+          "pageSize": 20
+        }
+      },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No valid session." },
+        { "status": 422, "code": "invalid_query", "condition": "Invalid filter/query values." }
+      ],
+      "implementation_notes": [
+        "Use src/lib/db/rls.ts::withTenant from Slice 1 for all list queries.",
+        "Leverage trigram index from Slice 1 schema on searchable columns where available.",
+        "Match pagination conventions established in Slice 2 GET /api/documents endpoint."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/observations/{id}",
+      "auth_required": true,
+      "roles_allowed": ["viewer", "editor", "admin"],
+      "request_body": null,
+      "path_params": { "id": "uuid (observation id)" },
+      "query_params": null,
+      "validation_rules": [
+        "Authenticated session required.",
+        "Observation must resolve inside tenant context.",
+        "Join evidence block summaries from linked evidence_block_ids."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "id": "uuid",
+          "label": "Émissions de GES Scope 1",
+          "normalizedKey": "ghg_scope1",
+          "value": "1240",
+          "unit": "tCO2e",
+          "dataType": "numeric",
+          "timeBehavior": "periodic",
+          "periodStart": "2024-01-01",
+          "periodEnd": "2024-12-31",
+          "numericValue": 1240,
+          "status": "candidate",
+          "provenanceType": "document",
+          "confidenceScore": 0.91,
+          "categoryId": "uuid|null",
+          "sourceDocumentVersionId": "uuid",
+          "extractionRunId": "uuid",
+          "evidenceBlocks": [
+            {
+              "id": "uuid",
+              "pageNumber": 3,
+              "textContent": "Scope 1 : 1 240 tCO2e",
+              "bbox": { "x1": 0.05, "y1": 0.42, "x2": 0.55, "y2": 0.45 },
+              "ocrConfidence": 0.97
+            }
+          ],
+          "createdAt": "iso8601",
+          "updatedAt": "iso8601"
+        }
+      },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No valid session." },
+        { "status": 404, "code": "observation_not_found", "condition": "Observation missing or outside tenant scope." }
+      ],
+      "implementation_notes": [
+        "Use src/lib/auth.ts::auth and src/lib/db/rls.ts::withTenant from Slice 1.",
+        "Map bbox ratio coordinates already normalized by Slice 2 OCR parser src/lib/ocr/parse.ts::parseOcrResponse.",
+        "Use observation-evidence linkage persisted by extraction job in this slice."
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/observations/{id}",
+      "auth_required": true,
+      "roles_allowed": ["editor", "admin"],
+      "request_body": {
+        "label": "string max 200 (optional)",
+        "normalizedKey": "snake_case max 100 regex ^[a-z][a-z0-9_]*$ (optional)",
+        "value": "string max 500 (optional)",
+        "unit": "string max 50 | null (optional)",
+        "periodStart": "ISO date | null (optional)",
+        "periodEnd": "ISO date | null (optional)",
+        "categoryId": "uuid | null (optional)"
+      },
+      "path_params": { "id": "uuid (observation id)" },
+      "query_params": null,
+      "validation_rules": [
+        "Role must not be viewer; viewer gets 403.",
+        "normalizedKey must match ^[a-z][a-z0-9_]{0,99}$.",
+        "periodEnd must be >= periodStart when both provided.",
+        "categoryId must belong to session.company_id when provided.",
+        "PATCH is partial; empty object is valid no-op 200."
+      ],
+      "success_response": { "status": 200, "body": { "id": "uuid", "label": "string", "normalizedKey": "string", "value": "string", "numericValue": "number|null", "unit": "string|null", "dataType": "numeric|percentage|text|boolean", "timeBehavior": "periodic|point_in_time|none", "periodStart": "ISO date|null", "periodEnd": "ISO date|null", "status": "candidate|approved|rejected|superseded|invalidated", "confidenceScore": "number", "categoryId": "uuid|null", "sourceDocumentVersionId": "uuid", "extractionRunId": "uuid", "provenanceType": "document|manual", "evidenceBlocks": [{ "id": "uuid", "pageNumber": "number", "textContent": "string", "bbox": { "x1": "number", "y1": "number", "x2": "number", "y2": "number" }, "ocrConfidence": "number" }], "updatedAt": "iso8601", "createdAt": "iso8601" } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session." },
+        { "status": 403, "code": "forbidden", "condition": "Role is viewer." },
+        { "status": 404, "code": "observation_not_found", "condition": "Observation missing or not in tenant." },
+        { "status": 422, "code": "validation_error", "condition": "normalizedKey regex invalid or period range invalid or category invalid.", "body": { "code": "validation_error", "errors": [{ "field": "string", "message": "string" }] } }
+      ],
+      "implementation_notes": [
+        "Role/tenant from Slice 1 auth and RLS helpers: src/lib/auth.ts::auth, src/lib/db/rls.ts::withTenant.",
+        "When approved observation key changes, enqueue Slice 1 queue instance in src/lib/queues.ts::semanticConflictQueue (semantic-conflict-job) with reason key_changed.",
+        "Use job naming/timeouts consistent with Slice 1 queue constants in src/lib/constants.ts (semantic-conflict-job timeout 60000 ms)."
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/observations/{id}/status",
+      "auth_required": true,
+      "roles_allowed": ["editor", "admin"],
+      "request_body": { "status": "approved|rejected|candidate" },
+      "path_params": { "id": "uuid (observation id)" },
+      "query_params": null,
+      "validation_rules": [
+        "Role must not be viewer.",
+        "State transition must satisfy isValidTransition(from,to,role).",
+        "candidate is valid target only from rejected.",
+        "superseded->approved allowed only for non-viewer roles.",
+        "approved->invalidated is system-only and not accepted by public route body enum.",
+        "Use SELECT FOR UPDATE to prevent double-click concurrency issues."
+      ],
+      "success_response": { "status": 200, "body": { "id": "uuid", "status": "approved|rejected|candidate", "updatedAt": "iso8601" } },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session." },
+        { "status": 403, "code": "forbidden", "condition": "Role is viewer." },
+        { "status": 404, "code": "observation_not_found", "condition": "Observation missing or not in tenant scope." },
+        { "status": 422, "code": "invalid_transition", "condition": "Requested status transition is not allowed for current state.", "body": { "code": "invalid_transition", "from": "current observation status string", "to": "requested observation status string" } }
+      ],
+      "implementation_notes": [
+        "Transition logic in src/lib/observations/stateMachine.ts::isValidTransition.",
+        "Transactional side effects in src/lib/observations/transitions.ts::applyTransition.",
+        "Queue dispatch uses Slice 1 queue registry src/lib/queues.ts::semanticConflictQueue for semantic-conflict-job.",
+        "Publish follow-up event using Slice 2 pub/sub helper src/lib/pipeline/pubsub.ts::publishPipelineEvent.",
+        "Audit and attestation tables are from Slice 1 schema modules src/lib/db/schema/observations.ts and src/lib/db/schema/notifications.ts."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/categories",
+      "auth_required": true,
+      "roles_allowed": ["viewer", "editor", "admin"],
+      "request_body": null,
+      "path_params": null,
+      "query_params": null,
+      "validation_rules": [
+        "Authenticated session required.",
+        "Returns only categories in tenant scope.",
+        "Ordering is path ASC then sort_order ASC."
+      ],
+      "success_response": {
+        "status": 200,
+        "body": {
+          "data": [
+            {
+              "id": "uuid",
+              "name": "string",
+              "description": "string|null",
+              "parentCategoryId": "uuid|null",
+              "path": "string",
+              "sortOrder": 0
+            }
+          ]
+        }
+      },
+      "error_responses": [
+        { "status": 401, "code": "unauthorized", "condition": "No session." }
+      ],
+      "implementation_notes": [
+        "This endpoint is moved forward from Slice 6 into Slice 3 because observation editing requires category selection.",
+        "Use Slice 1 tenant wrapper src/lib/db/rls.ts::withTenant and auth helper src/lib/auth.ts::auth.",
+        "Category schema source is Slice 1 src/lib/db/schema/documents.ts::documentCategories table definition."
+      ]
+    }
+  ],
+  "background_jobs": [
+    {
+      "queue": "extraction-job",
+      "job_name": "processExtractionJob",
+      "trigger": "Enqueued by Slice 2 embedding job after DocumentVersion reaches embedded status.",
+      "payload_schema": {
+        "documentVersionId": "uuid",
+        "companyId": "uuid"
+      },
+      "timeout_ms": 300000,
+      "retry_attempts": 2,
+      "steps": [
+        { "step": 1, "label": "Gate check", "detail": "SELECT document_version by id; inspect pipeline_status. Skip if already review_ready or later completion state. Skip if earlier than embedded. Allow re-entry for extracting without completed pipeline_run (crash recovery). Proceed only from embedded." },
+        { "step": 2, "label": "Start pipeline run", "detail": "INSERT pipeline_run(status='running', started_at=now(), stage='extraction')." },
+        { "step": 3, "label": "Mark stage", "detail": "UPDATE document_version SET pipeline_status='extracting', pipeline_status_updated_at=now(); publish pipeline_stage_changed via Redis pub/sub." },
+        { "step": 4, "label": "FR-18 document type auto-detect", "detail": "SELECT first 5 evidence_blocks ordered by page_number, position_index. Call Grok classifier prompt and constrain output to Slice 3 set sustainability_report|annual_report|audit_report|policy|other. Persist detected_type using the Slice 3 taxonomy; if persistence enum differs in upstream schema, apply the explicit mapping documented in known_spec_deviations without changing classifier output contract." },
+        { "step": 5, "label": "Query embedding for retrieval", "detail": "Call OpenAI text-embedding-3-small with fixed ESG broad query string to get query vector." },
+        { "step": 6, "label": "Dense retrieval", "detail": "Execute SQL: SELECT block_id, 1-(embedding <=> $query_vec) AS cosine_score FROM evidence_blocks WHERE document_version_id=$1 AND embedding_status='completed' ORDER BY cosine_score DESC LIMIT 200." },
+        { "step": 7, "label": "Sparse retrieval", "detail": "Execute SQL: SELECT block_id, similarity(text_content, $keyword_bag) AS trgm_score FROM evidence_blocks WHERE document_version_id=$1 ORDER BY trgm_score DESC LIMIT 200." },
+        { "step": 8, "label": "RRF fusion", "detail": "Compute score = 0.6*(1/(60+rank_A)) + 0.4*(1/(60+rank_B)); missing rank=N+1. Sort by fused score, select top 150." },
+        { "step": 9, "label": "Low-block guard", "detail": "If top set size < 10, write pipeline warning note {type:'insufficient_blocks',block_count:N,threshold:10}, set document_version.pipeline_status='review_ready', publish extraction_complete with warning='insufficient_blocks', and return without Grok extraction." },
+        { "step": 10, "label": "Build extraction prompt", "detail": "Construct prompt with document filename/category/client, soft key list, and top-150 blocks [{block_id,page_number,text}] instructing strict JSON output schema." },
+        { "step": 11, "label": "Call Grok extractor", "detail": "POST xAI Grok model grok-4-1-fast-reasoning in JSON mode. Timeout 120000 ms. Retry once only for schema-invalid response and only if elapsed < 240000 ms." },
+        { "step": 12, "label": "Parse and validate", "detail": "Validate Grok response against ParsedObservation[] Zod schema. On second consecutive invalid output: set pipeline_status='failed', write pipeline_error_message with truncated response, mark pipeline_run failed, publish pipeline_failed, return." },
+        { "step": 13, "label": "Hallucination guard", "detail": "For each parsed observation, verify every evidence_block_id exists in known block set for this document version; discard any observation that references unknown IDs." },
+        { "step": 14, "label": "Insert observations", "detail": "Bulk INSERT observation rows: status='candidate', provenance_type='document', company_id from payload, category_id inherited from document.category_id, extraction_run_id from pipeline_run, source_document_version_id=documentVersionId." },
+        { "step": 15, "label": "Exact-match conflict lookup", "detail": "For each new observation, execute SQL against approved observations in same company: WHERE normalized_key=$key AND status='approved' AND period_start <= $newPeriodEnd AND period_end >= $newPeriodStart." },
+        { "step": 16, "label": "Insert conflict_case records", "detail": "INSERT conflict_case for each exact match: match_method='exact', conflict_group_id=gen_random_uuid(), resolution_status='auto_resolved', auto_resolved=false, winning_observation_id=NULL, observation_ids=[newObsId,matchedObsId]. Do not supersede any observation here." },
+        { "step": 17, "label": "Finalize pipeline run", "detail": "UPDATE pipeline_run status='done', set finished_at=now(), observations_created count, observations_skipped count." },
+        { "step": 18, "label": "Mark review ready", "detail": "UPDATE document_version pipeline_status='review_ready'; publish pipeline_stage_changed(review_ready) and extraction_complete(observationCount)." },
+        { "step": 19, "label": "Create notification", "detail": "INSERT notification row type='pipeline_done' payload { document_id, observation_count } for company users." }
+      ],
+      "error_handling": [
+        "DLQ pattern inherited from Slice 2 workers/pipeline/dlq.ts after retries exhausted.",
+        "On timeout >300000 ms, mark pipeline_status failed and pipeline_error_message extraction_timeout.",
+        "On Grok schema-invalid output twice, fail extraction stage without partial status transition to review_ready.",
+        "On low-block guard condition (<10 retrieved blocks), do not fail job; complete with warning and zero observations.",
+        "Maintain idempotency by status gate checks before expensive operations."
+      ]
+    }
+  ],
+  "types_and_interfaces": [
+    {
+      "name": "ObservationStatus",
+      "file": "src/lib/observations/stateMachine.ts",
+      "definition": "export type ObservationStatus = 'candidate' | 'approved' | 'rejected' | 'superseded' | 'invalidated';"
+    },
+    {
+      "name": "TransitionRole",
+      "file": "src/lib/observations/stateMachine.ts",
+      "definition": "export type TransitionRole = 'admin' | 'editor' | 'viewer' | 'system';"
+    },
+    {
+      "name": "ParsedObservation",
+      "file": "src/lib/extraction/parseExtraction.ts",
+      "definition": "export type UUIDv7String = string; export type NonEmptyUuidv7Array = ({ 0: UUIDv7String } & UUIDv7String[]); export interface ParsedObservation { label: string; normalized_key: string; value: string; numeric_value: number | null; unit: string | null; data_type: 'numeric' | 'percentage' | 'text' | 'boolean'; time_behavior: 'periodic' | 'point_in_time' | 'none'; period_start: string | null; period_end: string | null; evidence_block_ids: NonEmptyUuidv7Array; confidence_score: number; }"
+    },
+    {
+      "name": "ObservationPatchInput",
+      "file": "src/app/api/observations/[id]/route.ts",
+      "definition": "export interface ObservationPatchInput { label?: string; normalizedKey?: string; value?: string; unit?: string | null; periodStart?: string | null; periodEnd?: string | null; categoryId?: string | null; }"
+    },
+    {
+      "name": "StatusPatchBody",
+      "file": "src/app/api/observations/[id]/status/route.ts",
+      "definition": "export interface StatusPatchBody { status: 'approved' | 'rejected' | 'candidate'; }"
+    },
+    {
+      "name": "ObservationDetailResponse",
+      "file": "src/app/api/observations/[id]/route.ts",
+      "definition": "export interface ObservationDetailResponse { id: string; label: string; normalizedKey: string; value: string; unit: string | null; dataType: 'numeric' | 'percentage' | 'text' | 'boolean'; timeBehavior: 'periodic' | 'point_in_time' | 'none'; periodStart: string | null; periodEnd: string | null; numericValue: number | null; status: ObservationStatus; provenanceType: 'document' | 'manual'; confidenceScore: number; categoryId: string | null; sourceDocumentVersionId: string; extractionRunId: string; evidenceBlocks: Array<{ id: string; pageNumber: number; textContent: string; bbox: { x1: number; y1: number; x2: number; y2: number }; ocrConfidence: number; }>; createdAt: string; updatedAt: string; }"
+    },
+    {
+      "name": "CategoryTreeItem",
+      "file": "src/app/api/categories/route.ts",
+      "definition": "export interface CategoryTreeItem { id: string; name: string; description: string | null; parentCategoryId: string | null; path: string; sortOrder: number; }"
+    },
+    {
+      "name": "ExtractionJobPayload",
+      "file": "workers/pipeline/jobs/extraction.ts",
+      "definition": "export interface ExtractionJobPayload { documentVersionId: string; companyId: string; }"
+    },
+    {
+      "name": "PipelineEventObservationApproved",
+      "file": "src/lib/pipeline/events.ts",
+      "definition": "export interface PipelineEventObservationApproved { type: 'observation_approved'; observationId: string; documentId: string; companyId: string; timestamp: string; }"
+    },
+    {
+      "name": "AuthJwtClaims",
+      "file": "src/lib/auth.ts",
+      "definition": "export interface AuthJwtClaims { user_id: string; company_id: string; role: 'admin' | 'editor' | 'viewer'; }"
+    }
+  ],
+  "constants": [
+    { "name": "LOW_CONFIDENCE_THRESHOLD", "file": "src/lib/constants.ts", "value": "0.70", "purpose": "Global OCR confidence cutoff from Slice 1 risk resolution; inherited by pipeline/extraction behavior." },
+    { "name": "EXTRACTION_QUEUE", "file": "src/lib/constants.ts", "value": "extraction-job", "purpose": "BullMQ queue name for extraction stage." },
+    { "name": "EXTRACTION_TIMEOUT_MS", "file": "src/lib/constants.ts", "value": "300000", "purpose": "Extraction job timeout." },
+    { "name": "SEMANTIC_CONFLICT_QUEUE", "file": "src/lib/constants.ts", "value": "semantic-conflict-job", "purpose": "Queue enqueued on approved/key_changed observation updates." },
+    { "name": "SEMANTIC_CONFLICT_TIMEOUT_MS", "file": "src/lib/constants.ts", "value": "60000", "purpose": "Timeout for semantic conflict worker jobs." },
+    { "name": "OCR_QUEUE", "file": "src/lib/constants.ts", "value": "ocr-job", "purpose": "BullMQ queue name for OCR stage from Slice 1 queue contract." },
+    { "name": "EMBEDDING_QUEUE", "file": "src/lib/constants.ts", "value": "embedding-job", "purpose": "BullMQ queue name for embedding stage from Slice 1 queue contract." },
+    { "name": "RENDER_PDF_QUEUE", "file": "src/lib/constants.ts", "value": "render-pdf-job", "purpose": "BullMQ queue name for PDF rendering stage from Slice 1 queue contract." },
+    { "name": "PENDING_OBS_TIMEOUT_QUEUE", "file": "src/lib/constants.ts", "value": "pending-obs-timeout", "purpose": "BullMQ queue name for pending observation timeout sweep from Slice 1 queue contract." },
+    { "name": "OCR_QUEUE_TIMEOUT_MS", "file": "src/lib/constants.ts", "value": "180000", "purpose": "Cross-cutting queue timeout context." },
+    { "name": "EMBEDDING_QUEUE_TIMEOUT_MS", "file": "src/lib/constants.ts", "value": "120000", "purpose": "Cross-cutting queue timeout context." },
+    { "name": "RENDER_PDF_TIMEOUT_MS", "file": "src/lib/constants.ts", "value": "90000", "purpose": "Cross-cutting queue timeout context." },
+    { "name": "PENDING_OBS_TIMEOUT_MS", "file": "src/lib/constants.ts", "value": "30000", "purpose": "Cross-cutting queue timeout context." },
+    { "name": "EXTRACTION_QUERY_STRING", "file": "src/lib/extraction/hybridRetrieval.ts", "value": "ESG environmental social governance metrics emissions energy water waste employees training accidents gender pay supply chain governance board", "purpose": "Fixed broad query embedded for dense retrieval." },
+    { "name": "ESG_KEYWORD_BAG", "file": "src/lib/constants.ts", "value": "GES émissions scope CO2 énergie eau déchets employés formation accidents genre gouvernance conseil administrateurs fournisseurs achats responsable", "purpose": "Static trigram sparse query text for hybrid retrieval." },
+    { "name": "RRF_DENSE_WEIGHT", "file": "src/lib/extraction/hybridRetrieval.ts", "value": "0.6", "purpose": "Dense rank contribution weight." },
+    { "name": "RRF_SPARSE_WEIGHT", "file": "src/lib/extraction/hybridRetrieval.ts", "value": "0.4", "purpose": "Sparse rank contribution weight." },
+    { "name": "RRF_K", "file": "src/lib/extraction/hybridRetrieval.ts", "value": "60", "purpose": "RRF smoothing constant." },
+    { "name": "HYBRID_TOP_K", "file": "src/lib/extraction/hybridRetrieval.ts", "value": "150", "purpose": "Final fused retrieval size passed to Grok." },
+    { "name": "MIN_BLOCKS_FOR_EXTRACTION", "file": "src/lib/extraction/hybridRetrieval.ts", "value": "10", "purpose": "Low-block guard threshold for skipping extraction with warning." },
+    { "name": "HNSW_EF_SEARCH_EXTRACTION", "file": "src/lib/extraction/hybridRetrieval.ts", "value": "100", "purpose": "Session override for pgvector HNSW extraction query quality." },
+    { "name": "THREE_PROCESS_PORTS", "file": "deployment/processes.md", "value": "app:3000,pipeline:3002,pdf:3001", "purpose": "Cross-cutting deployment topology required by project spec." }
+  ],
+  "sse_events": [
+    {
+      "event_name": "pipeline_stage_changed",
+      "payload": {
+        "type": "pipeline_stage_changed",
+        "documentVersionId": "uuid",
+        "documentId": "uuid",
+        "pipelineStatus": "extracting|review_ready",
+        "timestamp": "iso8601"
+      },
+      "emitted_by": "workers/pipeline/jobs/extraction.ts via src/lib/pipeline/pubsub.ts::publishPipelineEvent",
+      "consumed_by": "src/app/api/pipeline/events/route.ts and PipelineSSEProvider subscribers"
+    },
+    {
+      "event_name": "extraction_complete",
+      "payload": {
+        "type": "extraction_complete",
+        "documentVersionId": "uuid",
+        "documentId": "uuid",
+        "observationCount": 14,
+        "warning": "insufficient_blocks|undefined",
+        "timestamp": "iso8601"
+      },
+      "emitted_by": "workers/pipeline/jobs/extraction.ts",
+      "consumed_by": "documents UI badges and review navigation flows"
+    },
+    {
+      "event_name": "observation_approved",
+      "payload": {
+        "type": "observation_approved",
+        "observationId": "uuid",
+        "documentId": "uuid",
+        "companyId": "uuid",
+        "timestamp": "iso8601"
+      },
+      "emitted_by": "PATCH /api/observations/{id}/status handler",
+      "consumed_by": "conflict badge update stream (Slice 4 consumer expectations)"
+    }
+  ],
+  "acceptance_criteria": [
+    "After embedded status, extraction-job runs and creates at least one observation with status candidate when valid extractable evidence exists.",
+    "PATCH /api/observations/{id}/status with status approved on a candidate returns 200 and inserts attestation record.",
+    "PATCH /api/observations/{id}/status with status approved on an invalidated observation returns 422 with code invalid_transition and from/to payload.",
+    "PATCH /api/observations/{id}/status with status candidate from rejected returns 200 (reconsider).",
+    "Viewer role calling PATCH observation status returns 403.",
+    "Document split-view click on an observation row highlights bbox on page image via SVG overlay.",
+    "Review queue tabs display correct per-status counts and optimistic row movement on status changes.",
+    "Observations list supports status, normalizedKey, categoryId, q, and period filtering with paginated envelope { data, total, page, pageSize }.",
+    "Hallucination guard excludes observations that reference non-existent evidence block IDs.",
+    "GET /api/categories returns full tenant category tree sorted by path then sort_order.",
+    "TypeScript compile (tsc --noEmit) passes and Vitest unit/integration tests for Slice 3 pass."
+  ],
+  "known_spec_deviations": [
+    {
+      "item": "Sparse retrieval implementation",
+      "reason": "Spec §9.3 calls for BM25; implementation plan uses pg_trgm similarity to avoid external search engine and keep MVP stack simpler while retaining acceptable bilingual keyword recall."
+    },
+    {
+      "item": "Conflict resolution_status initial value naming",
+      "reason": "Exact conflict insertion marks resolution_status auto_resolved while also setting auto_resolved=false and no winner; this is retained verbatim from plan and interpreted as pre-classification placeholder pending Slice 4 user review."
+    },
+    {
+      "item": "FR-18 detected type taxonomy",
+      "reason": "Slice 3 classifier contract uses sustainability_report|annual_report|audit_report|policy|other, while base SQL detected_doc_type in Slice 1 uses a different taxonomy. Keep Slice 3 classifier output contract and map to storage enum only at persistence boundaries when required by the schema implementation."
+    },
+    {
+      "item": "File section content uses implementation-guidance prose rather than full TypeScript source code",
+      "reason": "Implementation plan JSON files are designed as structured specifications and contracts, not source code repositories. Prose descriptions provide enough detail for an implementing agent to produce correct code while keeping the plan files focused on behavior contracts, data shapes, and integration points."
+    }
+  ],
+  "implementation_order": [
+    "Implement extraction domain utilities: parseExtraction, hallucinationGuard, hybridRetrieval, grokExtract, exactConflict.",
+    "Implement observation state machine and transactional transition helper (stateMachine.ts + transitions.ts).",
+    "Implement pipeline worker extraction consumer workers/pipeline/jobs/extraction.ts and register it in workers/pipeline/index.ts using existing queue registry.",
+    "Implement API endpoints in this order: GET /api/categories, GET /api/documents/{id}/observations, GET /api/observations, GET /api/observations/{id}, PATCH /api/observations/{id}, PATCH /api/observations/{id}/status.",
+    "Wire status/edit APIs to semantic-conflict-job enqueue path and audit/attestation side effects.",
+    "Build UI components for split-view (DocumentSplitView, PageImageViewer, BboxOverlay, ObservationListPanel).",
+    "Build review queue components (ReviewQueueTabs, ObservationReviewRow, ObservationEditForm) and route /documents/[id]/review.",
+    "Build company observations browser route and filtering UI (ObservationFilterPanel + ObservationCard).",
+    "Add/adjust tests: unit (state machine, parser, guard, exact conflict), integration (extraction job + transitions), E2E (review queue and bbox highlight).",
+    "Run verification checklist commands and confirm SSE extraction_complete + UI behavior."
+  ]
+}
