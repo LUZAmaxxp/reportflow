@@ -6,6 +6,7 @@ import Credentials from "next-auth/providers/credentials";
  * The `authorize` callback is defined in auth.ts which runs in Node.js.
  */
 export const authConfig = {
+  trustHost: true,
   session: { strategy: "jwt", maxAge: 60 * 60 },
   providers: [
     Credentials({
