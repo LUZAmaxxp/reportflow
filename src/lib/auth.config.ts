@@ -1,23 +1,16 @@
 import type { NextAuthConfig } from "next-auth";
-import Credentials from "next-auth/providers/credentials";
 
 /**
- * Edge-safe auth config — no Node.js-only imports (bcrypt, drizzle, pg).
- * The `authorize` callback is defined in auth.ts which runs in Node.js.
+ * Edge-safe auth config — no Node.js-only imports (bcrypt, drizzle, pg, crypto).
+ * The `authorize` callback and Credentials provider are defined in auth.ts
+ * which runs in Node.js only.
  */
 export const authConfig = {
   trustHost: true,
   useSecureCookies: process.env.NODE_ENV === "production",
   secret: process.env.NEXTAUTH_SECRET || "dev-secret-key-change-in-production",
   session: { strategy: "jwt", maxAge: 60 * 60 },
-  providers: [
-    Credentials({
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
-      },
-    }),
-  ],
+  providers: [],
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
